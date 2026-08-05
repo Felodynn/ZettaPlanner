@@ -87,6 +87,7 @@ Closed. Recorded here so they are not re-argued mid-implementation.
 | D10 | **Postgres is the store of record; git is an optional one-way projection** | Both-as-truth is the same dual-write failure as D1. Git is allowed to be stale and is regenerable from the DB, which is what makes it safe. It buys diff and blame ergonomics, nothing structural. Off by default |
 | D11 | **Agents are principals**, subject to the same permission checks as humans | Otherwise "the user asked the agent to" becomes the way to write what the user could not write directly |
 | D12 | **C++/libtorch inference is [DEFERRED] to v0.1+** | Applying LumixAgents D2a's standard: a native dependency is justified only when no pure-Go path exists. Every v0 intelligence is LLM inference, and Ollama serves generation *and* embeddings over HTTP. Revisit when a custom DNN/ML pipeline exists, not before |
+| D13 | **The audit record is complete in v0; the CSV export is v0.1** (§6.5) | Recording and dumping are separable, and only one of them can be backfilled. Every day the product runs with an incomplete record is a day of retrospective data that does not exist when someone goes looking for it. The export is a query over a complete log — a weekend of work, deferred without cost. The log itself must be right from the first commit, so v0 carries the constraints that make it exportable later: no hard deletes, transition-specific actions, export indexes, populated `request_id`, and a stated retention of *never* |
 
 ---
 
@@ -637,14 +638,62 @@ CREATE TABLE audit_log (
   actor_id UUID NOT NULL REFERENCES actors(id),
   on_behalf_of UUID REFERENCES users(id),     -- set when an agent acts for a user
   action TEXT NOT NULL, subject_kind TEXT NOT NULL, subject_id UUID,
-  before JSONB, after JSONB, request_id TEXT,
+  before JSONB, after JSONB,
+  request_id TEXT NOT NULL,                   -- correlates one burst of writes
   at TIMESTAMPTZ NOT NULL
 );
+
+-- export indexes. Present from the first migration (D13)
+CREATE INDEX audit_project_at   ON audit_log (project_id, at);
+CREATE INDEX audit_subject_at   ON audit_log (subject_kind, subject_id, at);
+CREATE INDEX audit_actor_at     ON audit_log (actor_id, at);
+CREATE INDEX audit_action_at    ON audit_log (project_id, action, at);
+CREATE INDEX audit_request      ON audit_log (request_id);
 ```
+
+### 6.5 Audit permanence (D13)
+
+The CSV export is v0.1. The **record** is v0, and it carries five constraints
+that cannot be retrofitted:
+
+**1. No hard deletes, anywhere.** Not a happy accident of the current API — an
+invariant. A hard delete removes the row *and* orphans every audit entry
+pointing at it, which is the one failure that makes a retrospective unanswerable.
+Every object with a lifecycle carries `deleted_at` and is filtered in queries:
+`milestones`, `work_items`, `sub_tasks`, `checklist_items`, `deviations`,
+`catalog_entities`, `diagram_nodes`, `diagram_edges`, `notes`. Worklogs and
+messages are never deleted at all; correct by adding.
+
+**2. State transitions are their own action.** `work_item.status_changed`, not a
+generic `work_item.updated` whose reader has to diff two JSONB blobs to discover
+what moved. Bottleneck analysis is almost entirely transition analysis — how
+long an item sat in `blocked`, how often it bounced between `review` and
+`in_progress` — and making the transition first-class means the v0.1 export is a
+`SELECT` rather than a parser. Same for `milestone.status_changed`,
+`proposal.decided`, `deviation.resolved`, `checklist.checked`,
+`diagram.revised`, `ingest.accepted`, and `turn.ended`.
+
+**3. Every entry carries a `request_id`, populated.** It is what distinguishes
+*an agent applied a 14-change proposal in one operation* from *someone made 14
+edits over an afternoon*. Non-null in the schema so it cannot be quietly skipped.
+
+**4. Durations are derived, never stored.** Given complete transitions with
+timestamps, "how long was ZP-14 blocked" is a window function over the log. A
+stored duration field is a second source of truth that will disagree.
+
+**5. Retention is: never.** The log is not pruned, archived, or rotated. Written
+here so a later cleanup job to keep the table small is recognisable as a
+regression rather than housekeeping.
 
 **`audit_log` is append-only.** No `UPDATE`, no `DELETE`, enforced by a trigger.
 Every mutating handler writes exactly one entry per logical operation, inside
 the same transaction as the write.
+
+**What v0.1 adds** is the export shape, which is a design question best answered
+with real data in front of it. The likely answer is several exports rather than
+one — transitions, worklogs and deviations, turns and cost, and a raw event dump
+— because flattening JSONB `before`/`after` into a single CSV is lossy in
+precisely the ways that matter. **[DEFERRED to v0.1]**
 
 ### 6.2 Canonical semantic serialization
 
@@ -940,6 +989,7 @@ silent mixed-space search.
 ## 10. Deferred
 
 Sequence diagrams (v0.1) · Lumix integration and automated spec handoff (v0.1) ·
+**audit CSV export (v0.1 — the record is v0, see §6.5 and D13)** ·
 C++/libtorch inference (D12) · Milvus · auto-scheduling and critical path ·
 OIDC/SSO · notifications and email · multi-tenancy · mobile · offline editing ·
 CRDT co-editing · ZettaCAMS hooks.

@@ -6,7 +6,6 @@
 Chrome integration for visual QA
 **Required reading:** `CONTRACT.md` in full, plus this document's §1–§3. Read one
 phase at a time.
-**Preffered Theme:** OLED Dark theme with choice of accent colors at the settings, default to Cyan. (Keep other colors contrast to the overall theme)
 
 ---
 
@@ -350,6 +349,18 @@ superseded with the conflict shown.
 attributed to both agent and instructing user; spec export with preview and
 download; project settings; keyboard shortcuts on the item and canvas views;
 empty and loading states throughout.
+
+**Notes:**
+
+- **Render transition actions as transitions**, not as generic updates with two
+  JSONB blobs. `blocked → in_progress, 4d 6h` is the line a person reads;
+  `work_item.updated` with a diff is the line they skip. The backend records
+  these distinctly (contract §6.5.2) precisely so this view can.
+- Deleted objects still appear in audit history. A deleted work item's trail must
+  remain reachable — that is the whole reason nothing is hard-deleted.
+- **No CSV export button in v0.** The download is v0.1 (contract §6.5); shipping
+  a half-shaped export now sets an expectation about its columns that the real
+  design will have to break.
 
 **Manual test:** answer "who changed this due date, and why" for a real item,
 using only the UI. If it takes more than three clicks, the audit view is wrong.

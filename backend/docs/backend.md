@@ -140,8 +140,9 @@ Every phase: **implement → manual test → exit criteria → commit → next**
 validation (`/api/show`, live one-token completion, `/api/ps` allocated context,
 embedding dimension assertion); Ollama client for `/api/chat`, `/api/embed`;
 error normalisation; Postgres pool; migration runner; the full schema from
-`CONTRACT.md` §6.1; append-only audit table with its trigger; structured
-logging; health endpoint; OpenAPI document emission.
+`CONTRACT.md` §6.1 **including the audit export indexes**; append-only audit
+table with its trigger; the audit action taxonomy as a typed enum; structured
+logging with request ids; health endpoint; OpenAPI document emission.
 
 **Notes for the implementer:**
 
@@ -152,6 +153,17 @@ logging; health endpoint; OpenAPI document emission.
 - Error normalisation produces: `ErrContextOverflow`, `ErrToolParse`,
   `ErrRateLimit`, `ErrModelUnavailable`, `ErrTimeout`. Local and cloud Ollama
   return different shapes for the same conditions.
+- **The audit export indexes ship in the first migration** (contract §6.5).
+  Adding them a year later means building an index on a table you are trying to
+  read, at the moment you most want the data.
+- **`audit.Action` is a Go enum, not a string literal at each call site.**
+  Transition actions (`work_item.status_changed`, `proposal.decided`,
+  `deviation.resolved`, `checklist.checked`, `turn.ended`, …) are distinct
+  constants from the generic `*.updated`. A handler that writes a raw string is
+  a handler whose events cannot be found by the v0.1 export.
+- **`request_id` is `NOT NULL`.** Generated in middleware, threaded through
+  `context.Context`, written on every audit row. It is what separates one
+  14-change proposal application from fourteen afternoon edits.
 
 **Manual test:**
 ```bash
@@ -169,6 +181,10 @@ dimension and confirm boot fails rather than silently corrupting `chunks`.
 - [ ] Bad config fails at startup with a message naming the fix
 - [ ] Migrations idempotent and safe under two concurrent processes
 - [ ] `audit_log` rejects `UPDATE` and `DELETE`
+- [ ] Export indexes present in the first migration
+- [ ] `request_id` is `NOT NULL` and populated by middleware
+- [ ] Audit actions are typed constants; transitions distinct from `*.updated`
+- [ ] A comment in the schema states retention: never pruned, never rotated
 - [ ] OpenAPI document emits and validates
 
 ---
@@ -192,6 +208,13 @@ audit middleware.
   role *and* the available route. Lead with the action.
 - Agents get actor rows at creation, not on first use, so an audit row can never
   reference a principal that does not exist.
+- **No repository exposes a hard delete** (contract §6.5.1). `Delete` sets
+  `deleted_at` and writes an audit entry; every read filters it. Establish this
+  in the repo base helpers here, in Phase 1, while there are two tables — not in
+  Phase 4 when there are ten and one of them has already grown a `DELETE FROM`.
+- A logical operation touching several rows writes **one** audit entry with the
+  shared `request_id`, not one per row. The distinction is what makes the v0.1
+  transition export readable.
 
 **Manual test:**
 ```bash
@@ -207,6 +230,8 @@ curl -X PATCH /api/v1/work-items/{id} -d '{"due_date":"2026-09-01"}'
       changes behaviour with no handler change
 - [ ] Every mutating request writes exactly one audit row, in the same tx
 - [ ] Per-project role override beats the global role
+- [ ] No hard-delete path exists in any repository; a test greps for `DELETE FROM`
+      outside the migration runner and fails on a hit
 - [ ] A `403` names both the owning role and the route forward
 
 ---
@@ -337,6 +362,17 @@ date violation warnings; per-assignee and per-project queries.
   dates.
 - Worklogs are append-only in practice: correct by adding, not editing. That is
   what makes the log evidence rather than a current-state field.
+- **Every status change writes `*.status_changed`** with `before`/`after` — on
+  work items, milestones, subtasks, and deviation resolution. This is the phase
+  where the retrospective data is actually generated, and a transition recorded
+  as a generic update is a transition the v0.1 export cannot see. Same for
+  `checklist.checked`, including the un-check: a box ticked and then cleared is a
+  signal, and recording only the tick hides it.
+- **Durations are never stored.** No `time_in_status`, no `blocked_since`. Given
+  complete transitions, a window function answers it; a stored field is a second
+  source of truth that will disagree with the log.
+- Deletion is `deleted_at` plus a `*.deleted` audit entry. Dropping a work item
+  must leave its full history queryable.
 
 **Manual test:**
 ```bash
@@ -353,7 +389,11 @@ curl /api/v1/projects/{pid}/warnings
 - [ ] Warnings computed live for blocker-date and milestone-date violations
 - [ ] Developer can write dev-owned fields on assigned items only
 - [ ] Entity refs are set explicitly and never derived
-- [ ] `audit_log` reconstructs the full history of one work item
+- [ ] Every status change and checklist tick recorded as a transition action
+- [ ] Soft delete only; a deleted item's history stays queryable
+- [ ] `audit_log` reconstructs the full history of one work item — and a single
+      SQL query answers "how long did this item spend in each status", with no
+      stored duration field anywhere
 
 ---
 
@@ -561,6 +601,12 @@ git -C data/git/X log --oneline && git -C data/git/X show HEAD
 - [ ] Git projection regenerable from scratch to a byte-identical tree
 - [ ] Git failure never blocks or corrupts a DB write
 - [ ] Audit query reconstructs who changed what, including every agent write
+- [ ] **Export readiness rehearsal:** using SQL only, produce (a) every status
+      transition on a project with its duration, (b) all worklogs and deviations
+      with actor and timestamp, (c) agent turns with tokens and error class.
+      Nothing here ships a CSV — the point is to find the gap now, while the
+      product is still cheap to change, rather than in v0.1 when the missing
+      months cannot be recovered
 
 ---
 
@@ -605,3 +651,4 @@ harness and got lucky*.
 | Q4 | Is one retry enough for `tool_parse`, or does it need two with backoff? | Phase 6, from error-class data |
 | Q5 | Should item-scoped threads have their own context skeleton, or share the project one? | Phase 6 |
 | Q6 | Lease TTL and heartbeat interval that survive a laptop sleeping | Phase 2, then revisit in dogfood |
+| Q7 | What shape the v0.1 audit export takes — one flat CSV or several (transitions, worklogs, turns, raw events) | v0.1, from the Phase 8 rehearsal and real dogfood data. Deliberately not decided now |
