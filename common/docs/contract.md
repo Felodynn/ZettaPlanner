@@ -807,6 +807,7 @@ GET    /api/v1/projects/{pid}
 PATCH  /api/v1/projects/{pid}                   (manager+)
 GET    /api/v1/projects/{pid}/members
 PUT    /api/v1/projects/{pid}/members/{uid}     (admin)
+DELETE /api/v1/projects/{pid}/members/{uid}     (admin)
 
 GET    /api/v1/projects/{pid}/entities
 GET    /api/v1/entities/{id}                    → entity + placements + refs
@@ -867,7 +868,20 @@ POST   /api/v1/milestones/{id}/spec-export
 GET    /api/v1/projects/{pid}/audit             ?subject=&actor=&since=
 GET    /api/v1/admin/models                     (admin) → registry + live status
 GET    /api/v1/admin/users                      (admin)
+POST   /api/v1/admin/users                      (admin)
+GET    /api/v1/admin/users/{id}                 (admin, or your own)
+PATCH  /api/v1/admin/users/{id}                 (admin)
+DELETE /api/v1/admin/users/{id}                 (admin) → soft delete
 ```
+
+**The first account is created out of band.** `zettaplanner admin create-user`
+bootstraps it and refuses the moment any account exists, because without an
+admin there is no way to make one and a bootstrap that stayed available would
+be a back door.
+
+**Changing a role or a password, or deactivating an account, revokes every live
+session it holds.** A session must not outlast the authority it was issued
+under.
 
 ### 7.2 SSE events
 

@@ -265,14 +265,36 @@ curl -X PATCH /api/v1/work-items/{id} -d '{"due_date":"2026-09-01"}'
 ```
 
 **Exit criteria:**
-- [ ] Login, logout, session rotation, `me` with effective per-project role
-- [ ] Field ownership enforced from the table; adding a field to the table
+- [x] Login, logout, session rotation, `me` with effective per-project role
+- [x] Field ownership enforced from the table; adding a field to the table
       changes behaviour with no handler change
-- [ ] Every mutating request writes exactly one audit row, in the same tx
-- [ ] Per-project role override beats the global role
-- [ ] No hard-delete path exists in any repository; a test greps for `DELETE FROM`
+- [x] Every mutating request writes exactly one audit row, in the same tx
+- [x] Per-project role override beats the global role — **including downward**
+- [x] No hard-delete path exists in any repository; a test greps for `DELETE FROM`
       outside the migration runner and fails on a hit
-- [ ] A `403` names both the owning role and the route forward
+- [x] A `403` names both the owning role and the route forward
+
+**Decisions**
+
+| # | Decision | Rationale |
+|---|---|---|
+| D25 | **Field ownership is two columns, not two tiers.** A manager cannot write a dev-owned field — not `status`, not `progress_pct` — and the denial's route is *reassign the item to yourself first, or ask its assignee* | §4.2 is a two-column table and §4.1 gives the manager "all **manager-owned** fields". Read as a ladder it would collapse into "manager can do everything", and the point of `status` being dev-owned is that it is the developer's report of reality: a manager overwriting it destroys the signal instead of correcting it. The consequence is real and deliberate — closing a departed developer's item means reassigning it first, which is manager-owned and leaves an audit trail. **Flagged for confirmation in dogfood (Phase 9)** |
+| D26 | **The per-project role override wins in both directions**, except that `admin` is never lowered by a membership row | An override that could only raise is a permission you cannot take away, and "add the manager to this project as a developer" is the normal way to say *you are hands-on here*. Admin is deployment-level authority and a project membership is not the right place to revoke it |
+| D27 | **The written-field set is derived by reflection over the patch struct**, not by a hand-written switch | This is what makes the exit criterion true rather than aspirational: no handler names a field, so adding one to the ownership table plus the request struct is the entire change. `UnmappedFields` turns the inverse — a settable field with no rule — into a test failure rather than an unchecked write |
+| D28 | **The no-hard-delete test requires an annotation, not silence.** `DELETE FROM` is permitted only with a `zp:hard-delete-ok` marker *and* only on a table the contract does not list as soft-deleted | A blanket ban gets silenced the first time somebody genuinely needs a removal, and a silenced test enforces nothing. `project_members` is the one exception in v0: membership is current state, both the add and the removal are audited, and a soft-deleted membership row would need filtering out of every permission check for the rest of the product's life |
+| D29 | **A failed login is audited only when the account exists.** An unknown address is logged, not written to `audit_log` | The log's retention is never (§6.5 constraint 5). An unauthenticated caller able to append a row per request is an unauthenticated caller able to grow a table that is never pruned. Attempts against real accounts are bounded by the user count and are the ones worth having. **Open: rate limiting is not built, so even bounded attempts are unbounded in volume — decide before the deployment is reachable from anything but a LAN** |
+| D30 | **Each test package gets its own scratch database**, created on demand from `template1` | Go runs packages' tests concurrently, and two packages resetting one database produce failures that read exactly like product bugs. Installing pgvector into `template1` once is what lets the unprivileged application role create them |
+
+**Notes**
+
+- The session cookie holds a token; the database holds its SHA-256. There is no
+  path that reads a token back, only one that compares — so a database dump
+  does not hand over live sessions.
+- A wrong password and an unknown address return the identical message, and an
+  unknown address is verified against a fixed hash anyway. Two different
+  answers, or two different response times, is an account enumeration endpoint.
+- A non-member reading a project gets `not_found`, never `forbidden`.
+  Distinguishing them lets anyone enumerate which projects exist.
 
 ---
 

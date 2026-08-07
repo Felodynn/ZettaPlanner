@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"log/slog"
-	"os"
 	"strings"
 	"sync"
 	"testing"
@@ -15,7 +14,7 @@ import (
 
 	"github.com/Felodynn/ZettaPlanner/backend/internal/audit"
 	"github.com/Felodynn/ZettaPlanner/backend/internal/store"
-	"github.com/Felodynn/ZettaPlanner/backend/internal/telemetry"
+	"github.com/Felodynn/ZettaPlanner/backend/internal/testdb"
 )
 
 // These tests run against a real Postgres. The database is the product; a mock
@@ -24,54 +23,12 @@ import (
 //	createdb zettaplanner_test && psql -d zettaplanner_test -c 'CREATE EXTENSION vector'
 //	ZP_TEST_DATABASE_URL=postgres:///zettaplanner_test go test ./internal/store/
 
-func testURL(t *testing.T) string {
-	t.Helper()
-	url := os.Getenv("ZP_TEST_DATABASE_URL")
-	if url == "" {
-		t.Skip("ZP_TEST_DATABASE_URL is not set; skipping the database tests")
-	}
-	return url
-}
-
-// freshDB returns an empty database with no schema applied.
+// freshDB returns an empty database with no schema applied, scoped to this
+// package so a concurrently-running package cannot reset it underneath us.
 func freshDB(t *testing.T) (*store.DB, context.Context) {
 	t.Helper()
-	ctx := telemetry.WithRequestID(context.Background(), telemetry.NewRequestID())
-
-	db, err := store.Open(ctx, testURL(t))
-	if err != nil {
-		t.Fatalf("connecting: %v", err)
-	}
-	t.Cleanup(db.Close)
-
-	// A migration test that inherits the previous run's schema is not testing
-	// migration.
-	//
-	// Tables and our own functions only, deliberately not DROP SCHEMA public —
-	// that would take the pgvector extension with it, and recreating an
-	// extension needs superuser. The test role is the application role, which
-	// is exactly the privilege level the migration has to work at.
-	if _, err := db.Pool.Exec(ctx, resetSQL); err != nil {
-		t.Fatalf("resetting the schema: %v", err)
-	}
-	return db, ctx
+	return testdb.Fresh(t, "store")
 }
-
-const resetSQL = `
-DO $$
-DECLARE r record;
-BEGIN
-  FOR r IN SELECT tablename FROM pg_tables WHERE schemaname = 'public' LOOP
-    EXECUTE format('DROP TABLE IF EXISTS public.%I CASCADE', r.tablename);
-  END LOOP;
-  FOR r IN
-    SELECT p.oid::regprocedure AS sig
-    FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace
-    WHERE n.nspname = 'public' AND p.proname LIKE 'zp\_%'
-  LOOP
-    EXECUTE format('DROP FUNCTION IF EXISTS %s CASCADE', r.sig);
-  END LOOP;
-END $$;`
 
 // migratedDB returns a database with migrations applied and the minimum
 // fixtures every audit row needs.
@@ -142,8 +99,7 @@ func TestMigrateUpIsIdempotent(t *testing.T) {
 // before it reads the version. Without the lock both processes see version 0,
 // both run 0001, and the second dies on a unique constraint.
 func TestMigrateUpUnderConcurrency(t *testing.T) {
-	db, ctx := freshDB(t)
-	db.Close() // each racer opens its own pool, as separate processes would
+	_, ctx := freshDB(t)
 
 	const racers = 4
 	var (
@@ -156,15 +112,7 @@ func TestMigrateUpUnderConcurrency(t *testing.T) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			own, err := store.Open(ctx, testURL(t))
-			if err != nil {
-				mu.Lock()
-				errs = append(errs, err)
-				mu.Unlock()
-				return
-			}
-			defer own.Close()
-
+			own := testdb.Connect(t, "store")
 			got, err := store.MigrateUp(ctx, own, quietLog())
 			mu.Lock()
 			defer mu.Unlock()
@@ -181,13 +129,7 @@ func TestMigrateUpUnderConcurrency(t *testing.T) {
 		t.Fatalf("concurrent migration failed: %v", errs)
 	}
 
-	reopened, err := store.Open(ctx, testURL(t))
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer reopened.Close()
-
-	total, err := countMigrationFiles(ctx, reopened)
+	total, err := countMigrationFiles(ctx, testdb.Connect(t, "store"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -447,15 +389,23 @@ func TestInTxRollsBackOnError(t *testing.T) {
 func TestMigrateDownThenUp(t *testing.T) {
 	db, ctx, _ := migratedDB(t)
 
-	if _, err := store.MigrateDown(ctx, db, quietLog()); err != nil {
-		t.Fatalf("migrate down: %v", err)
+	// MigrateDown reverts one migration. Loop rather than assuming there is
+	// exactly one, so this stays correct as migrations are added.
+	for {
+		rolled, err := store.MigrateDown(ctx, db, quietLog())
+		if err != nil {
+			t.Fatalf("migrate down: %v", err)
+		}
+		if rolled == nil {
+			break
+		}
 	}
 	v, err := store.SchemaVersion(ctx, db.Pool)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if v != 0 {
-		t.Errorf("schema version after down is %d, want 0", v)
+		t.Errorf("schema version after reverting everything is %d, want 0", v)
 	}
 
 	if _, err := store.MigrateUp(ctx, db, quietLog()); err != nil {

@@ -39,6 +39,8 @@ func run(ctx context.Context, args []string) error {
 		return cmdModels(ctx, args[1:])
 	case "openapi":
 		return cmdOpenAPI(ctx, args[1:])
+	case "admin":
+		return cmdAdmin(ctx, args[1:])
 	case "help", "-h", "--help":
 		usage()
 		return nil
@@ -58,6 +60,7 @@ Usage:
   zettaplanner migrate status        Show the current schema version
   zettaplanner models check          Validate every configured model
   zettaplanner openapi               Emit the OpenAPI 3.1 document
+  zettaplanner admin create-user     Create the first account (bootstrap)
 
 Environment:
   ZP_ADDR                  Listen address (default :8080)
@@ -66,6 +69,9 @@ Environment:
   ZP_UPLOADS_DIR           Ingest source images (default data/uploads)
   ZP_LOG_LEVEL             debug | info | warn | error (default info)
   ZP_LOG_FORMAT            text | json (default text)
+  ZP_SESSION_TTL           Session lifetime (default 336h, fourteen days)
+  ZP_SECURE_COOKIES        Mark the session cookie Secure. On for any TLS deployment.
+  ZP_TRUST_PROXY           Trust X-Forwarded-For for the audited client address
   ZP_SKIP_MODEL_VALIDATION Skip the live model checks at boot. Never in a deployment.
 
 `)

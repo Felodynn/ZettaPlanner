@@ -16,6 +16,8 @@ import (
 	"github.com/Felodynn/ZettaPlanner/backend/internal/config"
 	"github.com/Felodynn/ZettaPlanner/backend/internal/httpapi"
 	"github.com/Felodynn/ZettaPlanner/backend/internal/llm"
+	"github.com/Felodynn/ZettaPlanner/backend/internal/service/auth"
+	"github.com/Felodynn/ZettaPlanner/backend/internal/service/project"
 	"github.com/Felodynn/ZettaPlanner/backend/internal/store"
 	"github.com/Felodynn/ZettaPlanner/backend/internal/telemetry"
 )
@@ -78,7 +80,19 @@ func cmdServe(ctx context.Context, args []string) error {
 		return fmt.Errorf("creating the uploads directory %s: %w", cfg.UploadsDir, err)
 	}
 
-	srv := httpapi.New(httpapi.Deps{DB: db, Registry: registry, Log: log, Started: time.Now()})
+	authSvc := auth.New(db, log, cfg.SessionTTL)
+	projectSvc := project.New(db, log)
+
+	srv := httpapi.New(httpapi.Deps{
+		DB:            db,
+		Registry:      registry,
+		Auth:          authSvc,
+		Projects:      projectSvc,
+		Log:           log,
+		Started:       time.Now(),
+		SecureCookies: cfg.SecureCookies,
+		TrustProxy:    cfg.TrustProxy,
+	})
 	httpSrv := &http.Server{
 		Addr:              cfg.Addr,
 		Handler:           srv.Handler,

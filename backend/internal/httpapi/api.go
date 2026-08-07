@@ -12,12 +12,15 @@ import (
 	"errors"
 	"log/slog"
 	"net/http"
+	"sort"
 	"time"
 
 	"github.com/danielgtaylor/huma/v2"
 	"github.com/danielgtaylor/huma/v2/adapters/humago"
 
 	"github.com/Felodynn/ZettaPlanner/backend/internal/llm"
+	"github.com/Felodynn/ZettaPlanner/backend/internal/service/auth"
+	"github.com/Felodynn/ZettaPlanner/backend/internal/service/project"
 	"github.com/Felodynn/ZettaPlanner/backend/internal/store"
 	"github.com/Felodynn/ZettaPlanner/backend/internal/telemetry"
 )
@@ -113,8 +116,20 @@ func errorDetails(errs []error) []map[string]any {
 type Deps struct {
 	DB       *store.DB
 	Registry *llm.Registry
+	Auth     *auth.Service
+	Projects *project.Service
 	Log      *slog.Logger
 	Started  time.Time
+
+	// SecureCookies marks the session cookie Secure. Configuration rather than
+	// a constant because development runs on plain http, and a cookie the
+	// browser refuses to store is a login that silently does nothing.
+	SecureCookies bool
+
+	// TrustProxy makes X-Forwarded-For authoritative for the client address
+	// written to the audit log. Off unless the deployment is actually behind a
+	// proxy: trusting it otherwise lets any caller choose what gets recorded.
+	TrustProxy bool
 }
 
 // Server is a built API: an http.Handler plus the huma API the document is
@@ -157,12 +172,48 @@ func New(deps Deps) *Server {
 	s := &Server{API: api, deps: deps}
 
 	s.registerHealth()
+	if deps.Auth != nil {
+		s.registerAuth()
+		s.registerUsers()
+	}
+	if deps.Projects != nil {
+		s.registerProjects()
+	}
 
 	// Middleware wraps the mux rather than the huma API so that it also covers
 	// the docs and openapi routes, and so the request id exists before huma
 	// begins validating anything.
-	s.Handler = requestIDMiddleware(loggingMiddleware(deps.Log, envelopeMiddleware(mux)))
+	//
+	// Order matters: the request id is generated outermost so every log line and
+	// every audit row inside can reach it, and the session is resolved innermost
+	// so that only routed requests pay for the lookup.
+	handler := s.sessionMiddleware(mux)
+	handler = envelopeMiddleware(handler)
+	handler = clientIPMiddleware(deps.TrustProxy, handler)
+	handler = loggingMiddleware(deps.Log, handler)
+	s.Handler = requestIDMiddleware(handler)
 	return s
+}
+
+// RegisterOperations exposes the registered paths, for tests that assert the
+// surface matches CONTRACT §7.1.
+func (s *Server) RegisterOperations() []string {
+	var out []string
+	for path, item := range s.API.OpenAPI().Paths {
+		for method, op := range map[string]*huma.Operation{
+			http.MethodGet:    item.Get,
+			http.MethodPost:   item.Post,
+			http.MethodPut:    item.Put,
+			http.MethodPatch:  item.Patch,
+			http.MethodDelete: item.Delete,
+		} {
+			if op != nil {
+				out = append(out, method+" "+path)
+			}
+		}
+	}
+	sort.Strings(out)
+	return out
 }
 
 // OpenAPI returns the generated document.
