@@ -70,6 +70,7 @@ Environment:
   ZP_LOG_LEVEL             debug | info | warn | error (default info)
   ZP_LOG_FORMAT            text | json (default text)
   ZP_SESSION_TTL           Session lifetime (default 336h, fourteen days)
+  ZP_LEASE_TTL             Diagram edit-session lifetime (default 5m)
   ZP_SECURE_COOKIES        Mark the session cookie Secure. On for any TLS deployment.
   ZP_TRUST_PROXY           Trust X-Forwarded-For for the audited client address
   ZP_SKIP_MODEL_VALIDATION Skip the live model checks at boot. Never in a deployment.

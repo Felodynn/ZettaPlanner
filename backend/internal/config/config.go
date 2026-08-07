@@ -38,6 +38,12 @@ type Config struct {
 	// SessionTTL is how long a session lives without being renewed.
 	SessionTTL time.Duration
 
+	// LeaseTTL is how long a diagram edit session survives without a
+	// heartbeat (Q6). Long enough to outlast a screen lock or a network blip,
+	// short enough that a browser killed mid-edit does not hold a diagram for
+	// an afternoon.
+	LeaseTTL time.Duration
+
 	// SecureCookies marks the session cookie Secure. Off by default because
 	// development runs on plain http; a cookie the browser refuses to store is
 	// a login that silently does nothing. On for any TLS deployment.
@@ -77,6 +83,12 @@ func Load() (*Config, error) {
 		return nil, fmt.Errorf("ZP_SESSION_TTL is not a duration (try \"336h\" for 14 days): %w", err)
 	}
 	c.SessionTTL = ttl
+
+	leaseTTL, err := time.ParseDuration(env("ZP_LEASE_TTL", "5m"))
+	if err != nil {
+		return nil, fmt.Errorf("ZP_LEASE_TTL is not a duration (try \"5m\"): %w", err)
+	}
+	c.LeaseTTL = leaseTTL
 
 	if c.DatabaseURL == "" {
 		return nil, fmt.Errorf("ZP_DATABASE_URL is empty; set it to something like postgres:///zettaplanner or postgres://user:pass@host:5432/zettaplanner")

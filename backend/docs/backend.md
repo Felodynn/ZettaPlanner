@@ -345,16 +345,44 @@ is rejected with a usable diff; write an invalid relation and read the error as
 if you were the model.
 
 **Exit criteria:**
-- [ ] Semantic and layout stores separate; import-boundary test passes and fails
+- [x] Semantic and layout stores separate; import-boundary test passes and fails
       when deliberately violated
-- [ ] Serialized YAML contains no coordinates, by construction
-- [ ] Serializer byte-deterministic across insertion orders
-- [ ] Save is atomic; stale base rejected with a diff, never merged
-- [ ] Lease acquired, heartbeated, expired; expiry blocks save
-- [ ] Layout write produces no revision and needs no lease
-- [ ] Closed vocabulary enforced; error names valid values
-- [ ] Cross-diagram query answers "what depends on entity X"
-- [ ] Name collision produces a Note, not a merge
+- [x] Serialized YAML contains no coordinates, by construction
+- [x] Serializer byte-deterministic across insertion orders
+- [x] Save is atomic; stale base rejected with a diff, never merged
+- [x] Lease acquired, heartbeated, expired; expiry blocks save
+- [x] Layout write produces no revision and needs no lease
+- [x] Closed vocabulary enforced; error names valid values **with their meanings**
+- [x] Cross-diagram query answers "what depends on entity X"
+- [x] Name collision produces a Note, not a merge
+
+**Decisions**
+
+| # | Decision | Rationale |
+|---|---|---|
+| D31 | **Notes get a row in the §4.2 ownership table.** `status` and `body` are manager-owned; anyone may raise one | Notes have a lifecycle and §4.2 predates it. Putting the check in a handler instead would be an authority decision living outside the table, which is the exact thing the table exists to prevent. Resolving "these two may be the same datastore" is an architectural judgement; noticing it is not, and a developer who spots an overlap should not have to ask permission to say so |
+| D32 | **A coordinate is not an owned field.** Any project member may write layout; no lease, no revision, no audit row — except the `layout_mode` flip, which is audited | The ownership table covers the semantic layer. Requiring a manager to tidy a canvas would mean the people who read a diagram most cannot make it readable. The flip *is* recorded because it is a permanent state change with a consequence: automatic layout stops, and turning it back on destroys the arrangement — which is why the reset is a separate endpoint requiring `confirm=true` rather than a field on the layout write |
+| D33 | **`diagrams` gains a stored `slug`** (migration 0003, contract §6.1 amended) | §6.2's document opens with `diagram: auth-context` and the git projection derives paths from it. Deriving that from the display name at serialization time makes a rename look like a delete plus an add — precisely what "stable identity in paths" exists to prevent. Same reasoning as the entity slug: assigned once, never follows the name |
+| D34 | **The closed-vocabulary `enum` stays in the OpenAPI document, and the schema-validation error is rewritten to teach** | The enum is what gives the frontend's generated client a union type instead of a string, so removing it costs real safety. But huma validates against it first and answers "validation failed" with the valid values buried in a nested array — fine for a browser, useless for a model. Phase 2 requires that error to teach because Phase 6 reads it. So the enum is kept and the message is replaced by the domain's teaching text: the same words whichever door the caller came in |
+| D35 | **One contract error code maps to exactly one HTTP status.** huma's 422 for a body-schema violation is normalised to the 400 our own `validation_failed` uses | A code that arrives as 400 sometimes and 422 other times is a special case the generated client has to carry, for no gain |
+| Q6 | **Lease TTL 5 minutes, heartbeat 60 seconds** — answered, and due to be revisited in dogfood | Long enough to survive a screen lock, a network blip, or a lid closed while somebody answers the door; short enough that a browser killed mid-edit does not hold a diagram for an afternoon. A sleeping laptop loses its lease, which is the correct outcome — the alternative is a diagram nobody can touch because of a machine that is not coming back. The TTL is published in the acquire response so the frontend does not hard-code a number that later disagrees with the server |
+
+**Notes**
+
+- The traversal that answers "what depends on X" runs over **catalog entities,
+  not diagram nodes**. The same service drawn in a context diagram and a
+  component diagram is one identity, and its dependents are the union. Doing it
+  per-diagram would answer a narrower question that nobody asked.
+- `contains` and `deploys_to` are excluded from that traversal. They say where
+  something sits, not what needs it; including them turns "what depends on the
+  token store" into "everything in the same trust boundary".
+- A save that changes nothing produces **no revision and no audit row**. An
+  empty revision is noise in the log and an empty commit in the git projection.
+- The heartbeat failure deliberately carries **no diff**. The lease records the
+  revision it was taken at, not the one the client last saw, so counting saves
+  from it counts the holder's own — it reported "2 saves landed while your
+  session was gone" when the holder had made both. The diff belongs on the save
+  path, where the request carries a base revision that means something.
 
 ---
 

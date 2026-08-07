@@ -18,6 +18,7 @@ const (
 	KindWorklog       ObjectKind = "worklog"
 	KindDeviation     ObjectKind = "deviation"
 	KindDiagram       ObjectKind = "diagram"
+	KindNote          ObjectKind = "note"
 )
 
 // Owner is which role owns a field. Deliberately not a ladder: a manager does
@@ -160,9 +161,30 @@ var table = map[ObjectKind]object{
 
 	KindDiagram: {
 		// "Diagram (semantic) | all | —"
+		//
+		// Semantic only. Layout is not in this table at all: a coordinate is
+		// not an owned field, layout writes take no lease and produce no
+		// revision, and any project member may move a box (D32).
 		allFields: &Rule{Owner: OwnerManager, Scope: ScopeProject},
 		create:    Rule{Owner: OwnerManager, Scope: ScopeProject},
 		del:       &Rule{Owner: OwnerManager, Scope: ScopeProject},
+	},
+
+	// Notes are not in CONTRACT §4.2's table, which predates them having a
+	// lifecycle. Adding the row here rather than putting the check in a handler
+	// is the whole point of the table: an authority decision that lives outside
+	// it is one that drifts (D31).
+	//
+	// Resolving "these two may be the same datastore" is an architectural
+	// judgement, so status is manager-owned. Anyone may raise one — a developer
+	// who spots an overlap should not have to ask permission to say so.
+	KindNote: {
+		fields: map[string]Rule{
+			"status": {OwnerManager, ScopeProject},
+			"body":   {OwnerManager, ScopeProject},
+		},
+		create: Rule{Owner: OwnerDeveloper, Scope: ScopeProject},
+		del:    &Rule{Owner: OwnerManager, Scope: ScopeProject},
 	},
 }
 

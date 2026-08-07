@@ -1,0 +1,2 @@
+DROP INDEX IF EXISTS diagrams_slug;
+ALTER TABLE diagrams DROP COLUMN IF EXISTS slug;

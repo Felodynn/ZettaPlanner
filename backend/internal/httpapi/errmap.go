@@ -6,9 +6,24 @@ import (
 	"log/slog"
 
 	"github.com/Felodynn/ZettaPlanner/backend/internal/domain"
+	"github.com/Felodynn/ZettaPlanner/backend/internal/domain/diagram"
 	"github.com/Felodynn/ZettaPlanner/backend/internal/llm"
 	"github.com/Felodynn/ZettaPlanner/backend/internal/policy"
+	"github.com/Felodynn/ZettaPlanner/backend/internal/repo"
+	diagramsvc "github.com/Felodynn/ZettaPlanner/backend/internal/service/diagram"
 )
+
+// revisionSummaries renders the revisions that landed under a caller, so a
+// conflict response says what changed rather than only that something did.
+func revisionSummaries(list []*repo.Revision) []map[string]any {
+	out := make([]map[string]any, 0, len(list))
+	for _, r := range list {
+		out = append(out, map[string]any{
+			"seq": r.Seq, "summary": r.Summary, "changes": r.Changes, "at": r.CreatedAt,
+		})
+	}
+	return out
+}
 
 // mapError turns anything the layers below return into the contract envelope.
 //
@@ -40,6 +55,56 @@ func mapError(ctx context.Context, log *slog.Logger, err error) error {
 			apiErr.WithRequestID(requestID(ctx))
 		}
 		return apiErr
+	}
+
+	// The diagram errors carry their own structured detail: which revisions
+	// landed, who holds the lease, when it lapses. Flattening them into a
+	// message would leave the client to parse prose to find out what to do.
+	var stale *diagramsvc.StaleBaseError
+	if errors.As(err, &stale) {
+		return Errorf(CodeStaleBaseRevision, "%s", stale.Error()).
+			WithDetail("base_revision", stale.Base).
+			WithDetail("current_revision", stale.Current).
+			WithDetail("revisions_since", revisionSummaries(stale.Since)).
+			WithRequestID(requestID(ctx))
+	}
+
+	var held *diagramsvc.LeaseHeldError
+	if errors.As(err, &held) {
+		return Errorf(CodeLeaseHeld, "%s", held.Error()).
+			WithDetail("holder_name", held.HolderName).
+			WithDetail("holder_kind", held.HolderKind).
+			WithDetail("expires_at", held.ExpiresAt).
+			WithRequestID(requestID(ctx))
+	}
+
+	var lost *diagramsvc.LeaseLostError
+	if errors.As(err, &lost) {
+		// Conflict rather than lease_held: nobody else is holding it, the
+		// caller's own session simply went away. The diff of what landed while
+		// it was gone is what makes the message actionable.
+		return Errorf(CodeConflict, "%s", lost.Error()).
+			WithDetail("expired_at", lost.ExpiredAt).
+			WithDetail("revisions_since", revisionSummaries(lost.Since)).
+			WithRequestID(requestID(ctx))
+	}
+
+	// A closed-vocabulary violation. The message lists every valid value with
+	// its meaning, because it is read by the vision model on ingest and by the
+	// planner when a tool call is rejected, and a bare refusal produces a
+	// second invalid value.
+	var vocab *diagram.VocabularyError
+	if errors.As(err, &vocab) {
+		return Errorf(CodeValidationFailed, "%s", vocab.Error()).
+			WithDetail("field", vocab.Field).
+			WithDetail("value", vocab.Value).
+			WithDetail("valid_values", vocab.Valid).
+			WithRequestID(requestID(ctx))
+	}
+
+	var graphInvalid *diagram.ValidationError
+	if errors.As(err, &graphInvalid) {
+		return Errorf(CodeValidationFailed, "%s", graphInvalid.Message).WithRequestID(requestID(ctx))
 	}
 
 	switch {

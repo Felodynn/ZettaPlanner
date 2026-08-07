@@ -46,6 +46,10 @@ func missing(kind string) error {
 	return fmt.Errorf("%w: %s", domain.ErrNotFound, kind)
 }
 
+// isNotFound reports whether err is the domain's not-found sentinel. Used where
+// absence is a normal answer rather than a failure.
+func isNotFound(err error) bool { return errors.Is(err, domain.ErrNotFound) }
+
 // conflict maps a unique-constraint violation onto the domain sentinel, naming
 // the constraint so the service can turn it into a message about the field the
 // user actually typed.

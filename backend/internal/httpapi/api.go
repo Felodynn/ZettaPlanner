@@ -20,6 +20,7 @@ import (
 
 	"github.com/Felodynn/ZettaPlanner/backend/internal/llm"
 	"github.com/Felodynn/ZettaPlanner/backend/internal/service/auth"
+	diagramsvc "github.com/Felodynn/ZettaPlanner/backend/internal/service/diagram"
 	"github.com/Felodynn/ZettaPlanner/backend/internal/service/project"
 	"github.com/Felodynn/ZettaPlanner/backend/internal/store"
 	"github.com/Felodynn/ZettaPlanner/backend/internal/telemetry"
@@ -62,10 +63,20 @@ func newAPIError(status int, msg string, errs ...error) *Error {
 		}
 	}
 	if apiErr == nil {
-		apiErr = Errorf(codeForStatus(status), "%s", msg).WithStatus(status)
+		// The status comes from the code, not from whatever huma raised.
+		// huma answers a body-schema violation with 422 while our own
+		// validation_failed is 400, and one contract code mapping to two
+		// statuses is a thing the generated client would have to special-case.
+		apiErr = Errorf(codeForStatus(status), "%s", msg)
 	}
 	if details := errorDetails(errs); len(details) > 0 {
 		apiErr.WithDetail("errors", details)
+		// A schema failure on a closed-set field is replaced by the domain's
+		// teaching error, so the message says what the valid values *mean*
+		// rather than only that the request failed. See vocabulary.go.
+		if lesson := teachClosedVocabulary(details); lesson != "" {
+			apiErr.Err.Message = lesson
+		}
 	}
 	return apiErr
 }
@@ -118,6 +129,7 @@ type Deps struct {
 	Registry *llm.Registry
 	Auth     *auth.Service
 	Projects *project.Service
+	Diagrams *diagramsvc.Service
 	Log      *slog.Logger
 	Started  time.Time
 
@@ -178,6 +190,9 @@ func New(deps Deps) *Server {
 	}
 	if deps.Projects != nil {
 		s.registerProjects()
+	}
+	if deps.Diagrams != nil {
+		s.registerDiagrams()
 	}
 
 	// Middleware wraps the mux rather than the huma API so that it also covers

@@ -290,7 +290,15 @@ write, by field, before the write lands.
 | Worklog | — | body, kind (author only) |
 | Deviation | resolution, resolved_at | summary, severity (reporter) |
 | Diagram (semantic) | all | — |
+| Note | status, body | — (anyone may raise one) |
 | Project settings | all | — |
+
+**Layout is not in this table.** A coordinate is not an owned field: layout
+writes take no lease, produce no revision, and any project member may move a
+node. Requiring a manager to tidy a canvas would mean the people who read a
+diagram most cannot make it readable. Re-running automatic layout on a `manual`
+diagram *is* in the table, under Diagram, because it destroys everybody's
+arrangement.
 
 **The rule that follows:**
 
@@ -407,10 +415,13 @@ CREATE TABLE catalog_entities (
 
 CREATE TABLE diagrams (
   id UUID PRIMARY KEY, project_id UUID NOT NULL REFERENCES projects(id),
-  name TEXT NOT NULL, level TEXT NOT NULL,          -- context|container|component
+  name TEXT NOT NULL,
+  slug TEXT NOT NULL,                               -- stable identity, never follows the name
+  level TEXT NOT NULL,                              -- context|container|component
   layout_mode TEXT NOT NULL DEFAULT 'auto',         -- auto|manual
   current_revision INT NOT NULL DEFAULT 0,
-  created_at TIMESTAMPTZ NOT NULL, updated_at TIMESTAMPTZ NOT NULL
+  created_at TIMESTAMPTZ NOT NULL, updated_at TIMESTAMPTZ NOT NULL,
+  UNIQUE (project_id, slug)
 );
 
 CREATE TABLE diagram_nodes (
@@ -821,6 +832,7 @@ POST   /api/v1/diagrams/{id}/lease/heartbeat
 DELETE /api/v1/diagrams/{id}/lease
 POST   /api/v1/diagrams/{id}/revisions          → atomic save; 409 on stale base
 PUT    /api/v1/diagrams/{id}/layout             → presentation only, no lease needed
+POST   /api/v1/diagrams/{id}/layout/reset       → discard coordinates; requires confirm
 GET    /api/v1/diagrams/{id}/revisions
 POST   /api/v1/diagrams/{id}/reevaluate         → creates a Proposal
 

@@ -17,6 +17,7 @@ import (
 	"github.com/Felodynn/ZettaPlanner/backend/internal/httpapi"
 	"github.com/Felodynn/ZettaPlanner/backend/internal/llm"
 	"github.com/Felodynn/ZettaPlanner/backend/internal/service/auth"
+	diagramsvc "github.com/Felodynn/ZettaPlanner/backend/internal/service/diagram"
 	"github.com/Felodynn/ZettaPlanner/backend/internal/service/project"
 	"github.com/Felodynn/ZettaPlanner/backend/internal/store"
 	"github.com/Felodynn/ZettaPlanner/backend/internal/telemetry"
@@ -82,12 +83,14 @@ func cmdServe(ctx context.Context, args []string) error {
 
 	authSvc := auth.New(db, log, cfg.SessionTTL)
 	projectSvc := project.New(db, log)
+	diagramSvc := diagramsvc.New(db, log, cfg.LeaseTTL)
 
 	srv := httpapi.New(httpapi.Deps{
 		DB:            db,
 		Registry:      registry,
 		Auth:          authSvc,
 		Projects:      projectSvc,
+		Diagrams:      diagramSvc,
 		Log:           log,
 		Started:       time.Now(),
 		SecureCookies: cfg.SecureCookies,
