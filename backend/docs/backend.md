@@ -171,21 +171,61 @@ zettaplanner models check          # validates every model, prints ctx + caps
 zettaplanner migrate up && zettaplanner migrate up   # idempotent
 zettaplanner openapi > openapi.json
 ```
+
+The database tests run against a real Postgres and skip themselves without one.
+The database is the product; a mock of it would test nothing.
+
+```bash
+sudo -u postgres psql -c "CREATE DATABASE zettaplanner_test OWNER $USER;"
+sudo -u postgres psql -d template1 -c "CREATE EXTENSION vector;"   # once, so
+                                    # every future createdb inherits pgvector
+make test-db
+```
 Deliberately set `num_ctx` above the model's maximum and confirm boot fails with
 an actionable message. Change the embedding model to one with a different
 dimension and confirm boot fails rather than silently corrupting `chunks`.
 
 **Exit criteria:**
-- [ ] All configured models validate; `/api/ps` allocated context matches config
-- [ ] Embedding dimension asserted against the `chunks` column at boot
-- [ ] Bad config fails at startup with a message naming the fix
-- [ ] Migrations idempotent and safe under two concurrent processes
-- [ ] `audit_log` rejects `UPDATE` and `DELETE`
-- [ ] Export indexes present in the first migration
-- [ ] `request_id` is `NOT NULL` and populated by middleware
-- [ ] Audit actions are typed constants; transitions distinct from `*.updated`
-- [ ] A comment in the schema states retention: never pruned, never rotated
-- [ ] OpenAPI document emits and validates
+- [x] All configured models validate; `/api/ps` allocated context matches config
+      — for `self_hosted`. `cloud` proves a floor by probe instead (D20)
+- [x] Embedding dimension asserted against the `chunks` column at boot
+- [x] Bad config fails at startup with a message naming the fix — covered by
+      `TestLoadModelsRejects` for ten distinct mistakes
+- [x] Migrations idempotent and safe under two concurrent processes
+- [x] `audit_log` rejects `UPDATE` and `DELETE` — and `TRUNCATE`, because a
+      cleanup job is the shape this failure actually arrives in
+- [x] Export indexes present in the first migration
+- [x] `request_id` is `NOT NULL` and populated by middleware, and generated
+      server-side rather than accepted from the caller
+- [x] Audit actions are typed constants; transitions distinct from `*.updated`
+- [x] A comment in the schema states retention: never pruned, never rotated
+- [x] OpenAPI document emits and validates
+
+**Decisions**
+
+| # | Decision | Rationale |
+|---|---|---|
+| D20 | **Startup window validation is tiered by `tier: self_hosted \| cloud`.** `self_hosted` keeps the D4 check unchanged: `/api/ps` allocated `context_length` must equal `num_ctx`. `cloud` substitutes a **context probe** — send filler, read `prompt_eval_count` back, treat it as a floor; grow the filler and a count that does not move is a clamp | Measured, not assumed: a completed chat against `glm-5.2:cloud` on Ollama 0.30.11 leaves `/api/ps` returning `{"models":[]}`, because the weights are not on this machine. The check D4 exists for is unavailable for the two models v0 actually runs on. Deleting it would reinstate exactly the failure D4 was written about; the probe keeps the guarantee with the only mechanism the cloud tier offers. `tier` is control of the runtime, not distance — a remote Ollama we administer is `self_hosted`, and its `/api/ps` was confirmed authoritative |
+| D21 | **The probe proves a floor and names what it did not prove.** Default floor 16,384 tokens at boot; `models check --full-probe` pays the full `num_ctx` in input tokens. Successful probes cache for 24h keyed on `(endpoint, model, num_ctx, target)` | Proving a 262,144-token window costs 262,144 input tokens per boot per cloud model. The floor rules out every common silent clamp (2048/4096/8192/16384), which is the failure class that actually happened. Reporting "at least N proven, the rest unverified" rather than "ok" is the same discipline as naming what context assembly dropped: a validation that overstates its coverage is the truncation failure one level up |
+| D22 | **Fallback across `roles.prefer` is resolved at turn boundaries only, never mid-turn.** `ErrRateLimit` ends the turn; the next turn resolves to the next model and records it on `agent_turns.model` | A turn spanning two models spans two context windows and two tool-calling behaviours. `trace` becomes unreadable and §4's per-model measurements stop meaning anything — you can no longer distinguish *I improved the harness* from *the model changed underneath me*. Context assembly is budgeted against the chosen model, which requires choosing before assembling |
+| D24 | **Migration 0001 asserts pgvector, it does not create it.** `CREATE EXTENSION` requires superuser; the migration raises a named error instead, telling the operator the package to install and the statement to run | A migration runner that needs superuser is a deployment where the application role has superuser, which is a much larger problem than one manual setup step. The assertion also fails at `migrate up` rather than at the first `CREATE TABLE … VECTOR(1024)`, so the message is about pgvector rather than about an unknown type. Verified: the down migration leaves the extension in place, so `down` then `up` round-trips without privileges |
+| D23 | **The OpenAPI error schema is the Go type, not a custom marshaller.** `huma.NewError` is overridden alongside `huma.NewErrorWithContext`, and the router's own plain-text 404/405 are rewritten into the envelope by middleware | huma derives the error schema by reflecting over whatever `NewError` returns. Overriding only the per-request hook produced a server that emitted the contract's envelope while the document advertised RFC 9457 — and the frontend's client is generated from that document. That is D2's generated lie one level down. Same reasoning for the router's prose 404: "one shape, always" (§7.3) is worth nothing if the shape changes exactly when something has gone wrong |
+
+**Measurements**
+
+- `glm-5.2:cloud` — `/api/show` reports a 1,000,000-token ceiling and
+  `[thinking, completion, tools]`. **No `vision`.** The planner/vision split is
+  therefore forced by capability, not chosen.
+- `gemma4:31b-cloud` — 262,144 ceiling, `[completion, thinking, tools, vision]`.
+- Probe ratio: 4,096 unique filler words evaluated as **20,891 prompt tokens**
+  on `glm-5.2:cloud`, so roughly five tokens per word. The probe sizes its
+  filler from that and then corrects against the real count.
+- Cold-loading `qwen3-256k:latest` at 131,072 ctx through the Cloudflare-fronted
+  remote returned **HTTP 524** once — the origin's load time exceeds the proxy's
+  100s ceiling. Warm, it validates in ~10s. **Open: the planner fallback cannot
+  be validated from cold through that proxy.** Options are a longer `keep_alive`
+  on the remote, a preload on that host, or bypassing the proxy. Decide before
+  Phase 6, when the fallback first matters.
 
 ---
 

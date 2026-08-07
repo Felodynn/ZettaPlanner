@@ -924,43 +924,73 @@ route ("raise a proposal"), whether the caller is a human or an agent.
 
 ```yaml
 models:
-  planner-local:
+  planner-cloud:
     endpoint: http://localhost:11434
-    model: qwen3.6:35b
+    tier: cloud                # self_hosted | cloud — see validation below (D20)
+    model: glm-5.2:cloud
     num_ctx: 262144            # MUST be explicit
-    caps: [tools]
-    concurrency: 1
-  vision-local:
+    assembly_budget: 120000    # what context assembly targets; defaults to num_ctx
+    caps: [tools, long_context]
+    concurrency: 4
+  vision-cloud:
     endpoint: http://localhost:11434
-    model: gemma4:31b
+    tier: cloud
+    model: gemma4:31b-cloud
     num_ctx: 262144
     caps: [vision]
+    concurrency: 2
+  planner-local:
+    endpoint: http://localhost:11434
+    tier: self_hosted
+    model: qwen3.6:35b
+    num_ctx: 262144
+    caps: [tools]
     concurrency: 1
   embed-local:
     endpoint: http://localhost:11434
+    tier: self_hosted
     model: bge-m3
     caps: [embedding]
     dim: 1024
-  planner-cloud:
-    endpoint: https://ollama.com
-    model: glm-5.2:cloud
-    auth_env: OLLAMA_API_KEY
-    caps: [tools, long_context]
-    concurrency: 4
 
 roles:
-  planner: { requires: [tools],     prefer: [planner-local, planner-cloud] }
-  vision:  { requires: [vision],    prefer: [vision-local] }
+  planner: { requires: [tools],     prefer: [planner-cloud, planner-local] }
+  vision:  { requires: [vision],    prefer: [vision-cloud] }
   embed:   { requires: [embedding], prefer: [embed-local] }
 ```
 
-**Startup validation is mandatory and fails loudly.** For each configured model:
-`/api/show` for capability and maximum window; a live one-token completion; and
-**`/api/ps` for the actually-allocated `context_length`**, which is the only
-check that proves the window took effect. Embedding models additionally assert
-that the returned vector length equals the configured `dim` and matches the
-`chunks.embedding` column — a silent dimension change corrupts every subsequent
-retrieval.
+`auth_env` names an environment variable holding a bearer token. It is normally
+absent: cloud models reached through a local Ollama daemon authenticate with
+that daemon's own signing key, so there is one endpoint, one code path, and no
+API key in the process environment.
+
+**Startup validation is mandatory and fails loudly**, and what it can prove
+depends on who runs the weights (D20). `tier` is that axis — control of the
+runtime, not distance. A remote Ollama we administer is `self_hosted`.
+
+For every model: `/api/show` for capability and maximum window, then a live
+one-token completion. Then the window proof:
+
+| `tier` | Window proof |
+|---|---|
+| `self_hosted` | **`/api/ps` for the actually-allocated `context_length`**, asserted equal to `num_ctx`. The only check that proves the window took effect |
+| `cloud` | **A context probe.** `/api/ps` reports nothing for a model running on someone else's fleet, so validation sends a filler prompt and reads `prompt_eval_count` back. That count is a floor: a server reporting it evaluated 20,000 prompt tokens has at least a 20,000-token window. Grow the filler, and a count that does not move is a clamp caught in the act |
+
+The probe proves a floor, not the whole window, and **says so in its output**.
+Proving the full configured window costs that many input tokens; validation
+demands a default floor high enough to rule out every common silent clamp, and
+pays for the rest only on request. A validation that overstates what it checked
+is the same failure as the truncation it was written to catch, one level up.
+
+Embedding models additionally assert that the returned vector length equals the
+configured `dim` and matches the `chunks.embedding` column — a silent dimension
+change corrupts every subsequent retrieval.
+
+**Fallback across `prefer` is resolved at turn boundaries only** (D22). The
+model chosen for a turn is fixed for that whole turn and recorded on
+`agent_turns.model`. A turn that spans two models spans two context windows and
+two tool-calling behaviours, and neither its trace nor the Phase 6 measurements
+can be read afterwards.
 
 Every request sets `options.num_ctx` explicitly and a `keep_alive` long enough
 to survive a turn.

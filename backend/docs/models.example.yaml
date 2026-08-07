@@ -1,0 +1,91 @@
+# Example model registry. Copy to ~/.zettaplanner/models.yaml and edit.
+#
+# This file is machine-scoped and never committed (CONTRACT §8). Startup
+# validation is mandatory and fails loudly; `zettaplanner models check` runs the
+# same checks on demand and prints what each one proved.
+#
+# tier decides how the context window is proven (D20):
+#
+#   self_hosted  We run the weights, so /api/ps reports the window the server
+#                actually allocated, and validation asserts it equals num_ctx.
+#                True for a remote Ollama we administer as much as for
+#                localhost — the axis is control of the runtime, not distance.
+#
+#   cloud        Ollama Cloud runs the model. /api/ps returns an empty list
+#                even straight after a completion, so the window is proven by a
+#                context probe: send filler, read prompt_eval_count back, and
+#                treat that count as a floor. Grow the filler and a count that
+#                does not move is a clamp caught in the act.
+#
+# Cloud models are reached through the local Ollama daemon, which forwards to
+# ollama.com using the key from `ollama signin`. Hence localhost endpoints and
+# no auth_env: one code path, no API key in the process environment. Set
+# auth_env only when talking to a gateway that wants its own bearer token.
+
+models:
+  planner-cloud:
+    endpoint: http://localhost:11434
+    tier: cloud
+    model: glm-5.2:cloud
+    num_ctx: 262144           # MUST be explicit (D4)
+    assembly_budget: 120000   # what context assembly targets; defaults to num_ctx
+    caps: [tools, thinking, long_context]
+    concurrency: 4
+    keep_alive: 30m
+    timeout: 15m
+
+  vision-cloud:
+    endpoint: http://localhost:11434
+    tier: cloud
+    model: gemma4:31b-cloud
+    num_ctx: 262144
+    assembly_budget: 120000
+    caps: [vision, tools, thinking]
+    concurrency: 2
+    keep_alive: 30m
+    timeout: 15m
+
+  # Fallbacks. Engaged at a turn boundary only, never mid-turn (D22).
+  planner-remote:
+    endpoint: https://ollama.example.internal
+    tier: self_hosted
+    model: qwen3-256k:latest
+    num_ctx: 131072
+    assembly_budget: 64000
+    caps: [tools, vision, thinking]
+    concurrency: 1
+    keep_alive: 30m
+    timeout: 20m
+
+  vision-local:
+    endpoint: http://localhost:11434
+    tier: self_hosted
+    model: gemma4:12b
+    num_ctx: 32768
+    assembly_budget: 24000
+    caps: [vision, tools, thinking]
+    concurrency: 1
+    keep_alive: 30m
+    timeout: 20m
+
+  # Embeddings stay local and have no fallback. They are written inside the same
+  # transaction as the row they describe, and a round trip to another host
+  # inside an open transaction holds locks for the length of that round trip.
+  #
+  # dim must equal the chunks.embedding column, and startup asserts it. Changing
+  # the embedding model requires re-embedding the corpus: a mismatch at query
+  # time is an error, never a silent mixed-space search.
+  embed-local:
+    endpoint: http://localhost:11434
+    tier: self_hosted
+    model: bge-m3
+    caps: [embedding]
+    dim: 1024
+    concurrency: 4
+    keep_alive: 1h
+    timeout: 5m
+
+roles:
+  planner: { requires: [tools],     prefer: [planner-cloud, planner-remote] }
+  vision:  { requires: [vision],    prefer: [vision-cloud, vision-local] }
+  embed:   { requires: [embedding], prefer: [embed-local] }

@@ -1,0 +1,7 @@
+bin/
+openapi.json
+data/
+
+# models.yaml is machine-scoped and never committed (CONTRACT §8). The example
+# in docs/ is what belongs in the repository.
+models.yaml
