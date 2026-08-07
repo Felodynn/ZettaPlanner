@@ -74,6 +74,13 @@ type Report struct {
 	ProofMethod ProofMethod `json:"proof_method"`
 	ProofCached bool        `json:"proof_cached"`
 
+	// FormatEnforced records whether the server honours a JSON Schema in
+	// `format` or accepts it and answers in prose anyway (D38). Not a failure:
+	// callers that need structure state it in the prompt and validate the
+	// answer. It is reported because a deployment should know which of the two
+	// it is running on.
+	FormatEnforced bool `json:"format_enforced"`
+
 	EmbeddingDim int           `json:"embedding_dim,omitempty"`
 	Latency      time.Duration `json:"latency"`
 
@@ -264,7 +271,10 @@ func (r *Registry) validateOne(ctx context.Context, m *config.Model, opts Valida
 	rep.pass("live completion in %s (%d prompt tokens, %d generated)",
 		rep.Latency.Round(time.Millisecond), resp.PromptEvalCount, resp.EvalCount)
 
-	// ── 3. window proof, tiered (D20) ───────────────────────────────────
+	// ── 3. structured output (D38) ──────────────────────────────────────
+	r.checkFormatEnforcement(ctx, c, rep)
+
+	// ── 4. window proof, tiered (D20) ───────────────────────────────────
 	switch m.Tier {
 	case config.TierSelfHosted:
 		r.proveByPS(ctx, c, m, rep)
@@ -272,6 +282,56 @@ func (r *Registry) validateOne(ctx context.Context, m *config.Model, opts Valida
 		r.proveByProbe(ctx, c, m, rep, opts, cache, log)
 	}
 	return rep
+}
+
+// formatProbeSchema is the smallest schema that can tell enforcement from
+// prose. Deliberately tiny: this runs at every boot, for every model.
+var formatProbeSchema = json.RawMessage(
+	`{"type":"object","properties":{"answer":{"type":"string"}},"required":["answer"]}`)
+
+// checkFormatEnforcement finds out whether the server honours `format`.
+//
+// It does not always. Measured against Ollama 0.30.11: a request carrying a
+// JSON Schema in `format` is answered with a schema-conforming object by a
+// locally-served gemma4:12b and with markdown prose by gemma4:31b-cloud and
+// glm-5.2:cloud. The field is accepted and discarded, exactly as
+// /v1/chat/completions discards num_ctx (D4) and exactly as /api/ps reports
+// nothing for a cloud model (D20). Three times now the same shape: a guarantee
+// that holds for weights we run and silently does not for weights we rent.
+//
+// This is a warning, not a failure. The ingest extractor copes — it restates
+// the shape in the prompt, finds the object inside whatever prose arrives, and
+// retries with a teaching error — but "copes" is a different thing from
+// "guaranteed", and which one a deployment is getting should be visible in
+// `models check` rather than discovered from a diagram with no boxes in it.
+func (r *Registry) checkFormatEnforcement(ctx context.Context, c *Client, rep *Report) {
+	no := false
+	zero := 0.0
+	resp, err := c.Chat(ctx, ChatRequest{
+		Messages: []Message{{Role: "user", Content: "What is the capital of France?"}},
+		Format:   formatProbeSchema,
+		Think:    &no,
+		Options:  Options{Temperature: &zero},
+	})
+	if err != nil {
+		rep.pass("structured-output check could not run: %v", err)
+		return
+	}
+
+	var probe struct {
+		Answer *string `json:"answer"`
+	}
+	content := strings.TrimSpace(resp.Message.Content)
+	if err := json.Unmarshal([]byte(content), &probe); err == nil && probe.Answer != nil {
+		rep.FormatEnforced = true
+		rep.pass("the server enforces `format`: a schema-constrained request came back as a conforming object")
+		return
+	}
+
+	rep.FormatEnforced = false
+	rep.pass("the server ACCEPTS BUT IGNORES `format`: a schema-constrained request came back as %s. "+
+		"Structured output is not guaranteed for this model; callers must state the shape in the prompt and validate the answer themselves (D38)",
+		truncate(content, 80))
 }
 
 // proveByPS is the original D4 check: only /api/ps says what the server

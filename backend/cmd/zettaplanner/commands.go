@@ -18,6 +18,7 @@ import (
 	"github.com/Felodynn/ZettaPlanner/backend/internal/llm"
 	"github.com/Felodynn/ZettaPlanner/backend/internal/service/auth"
 	diagramsvc "github.com/Felodynn/ZettaPlanner/backend/internal/service/diagram"
+	ingestsvc "github.com/Felodynn/ZettaPlanner/backend/internal/service/ingest"
 	"github.com/Felodynn/ZettaPlanner/backend/internal/service/project"
 	"github.com/Felodynn/ZettaPlanner/backend/internal/store"
 	"github.com/Felodynn/ZettaPlanner/backend/internal/telemetry"
@@ -84,6 +85,14 @@ func cmdServe(ctx context.Context, args []string) error {
 	authSvc := auth.New(db, log, cfg.SessionTTL)
 	projectSvc := project.New(db, log)
 	diagramSvc := diagramsvc.New(db, log, cfg.LeaseTTL)
+	ingestSvc := ingestsvc.New(db, log, registry, diagramSvc, cfg.UploadsDir)
+
+	// An ingest left mid-flight by a killed process is indistinguishable from
+	// one still working, and the difference matters to whoever is waiting for
+	// it. Swept once at boot, before anything can look.
+	if _, err := ingestSvc.RecoverInterrupted(requestCtx); err != nil {
+		log.WarnContext(requestCtx, "could not sweep interrupted ingests", "error", err)
+	}
 
 	srv := httpapi.New(httpapi.Deps{
 		DB:            db,
@@ -91,6 +100,7 @@ func cmdServe(ctx context.Context, args []string) error {
 		Auth:          authSvc,
 		Projects:      projectSvc,
 		Diagrams:      diagramSvc,
+		Ingests:       ingestSvc,
 		Log:           log,
 		Started:       time.Now(),
 		SecureCookies: cfg.SecureCookies,
@@ -120,7 +130,15 @@ func cmdServe(ctx context.Context, args []string) error {
 		log.Info("shutting down")
 		shutdownCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 20*time.Second)
 		defer cancel()
-		return httpSrv.Shutdown(shutdownCtx)
+		if err := httpSrv.Shutdown(shutdownCtx); err != nil {
+			return err
+		}
+		// Background extraction outlives the request that started it, so the
+		// process has to outlive the extraction. Cut short, it leaves pages
+		// claimed and an ingest stuck in `extracting` for the recovery sweep to
+		// find on the next boot.
+		ingestSvc.Wait()
+		return nil
 	}
 }
 

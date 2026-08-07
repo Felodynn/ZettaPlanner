@@ -60,6 +60,11 @@ const (
 	ActionIngestMerged    Action = "ingest.merged"    // transition
 	ActionIngestAccepted  Action = "ingest.accepted"  // transition
 	ActionIngestFailed    Action = "ingest.failed"    // transition
+	// ActionIngestPageRetried is a human asking for one page to be read again.
+	// Its own action rather than a second ingest.extracted: "this page needed
+	// three attempts before anyone trusted it" is a fact a retrospective wants,
+	// and it is invisible if a retry looks like an ordinary extraction.
+	ActionIngestPageRetried Action = "ingest.page_retried"
 
 	// ── plan ─────────────────────────────────────────────────────────────
 	ActionMilestoneCreated       Action = "milestone.created"
@@ -172,7 +177,7 @@ var known = func() map[Action]bool {
 		ActionEdgeCreated, ActionEdgeUpdated, ActionEdgeDeleted,
 
 		ActionIngestCreated, ActionIngestExtracted, ActionIngestMerged,
-		ActionIngestAccepted, ActionIngestFailed,
+		ActionIngestAccepted, ActionIngestFailed, ActionIngestPageRetried,
 
 		ActionMilestoneCreated, ActionMilestoneUpdated, ActionMilestoneDeleted,
 		ActionMilestoneStatusChanged,

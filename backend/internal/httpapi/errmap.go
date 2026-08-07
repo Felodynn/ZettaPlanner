@@ -7,6 +7,7 @@ import (
 
 	"github.com/Felodynn/ZettaPlanner/backend/internal/domain"
 	"github.com/Felodynn/ZettaPlanner/backend/internal/domain/diagram"
+	"github.com/Felodynn/ZettaPlanner/backend/internal/domain/ingest"
 	"github.com/Felodynn/ZettaPlanner/backend/internal/llm"
 	"github.com/Felodynn/ZettaPlanner/backend/internal/policy"
 	"github.com/Felodynn/ZettaPlanner/backend/internal/repo"
@@ -105,6 +106,23 @@ func mapError(ctx context.Context, log *slog.Logger, err error) error {
 	var graphInvalid *diagram.ValidationError
 	if errors.As(err, &graphInvalid) {
 		return Errorf(CodeValidationFailed, "%s", graphInvalid.Message).WithRequestID(requestID(ctx))
+	}
+
+	// An accept that would put an invented name on the canvas. The detail
+	// carries the slugs, so a UI can jump straight to the boxes rather than
+	// making somebody parse the list out of the message.
+	var illegible *ingest.IllegibleError
+	if errors.As(err, &illegible) {
+		return Errorf(CodeValidationFailed, "%s", illegible.Error()).
+			WithDetail("unreadable", illegible.Slugs()).
+			WithRequestID(requestID(ctx))
+	}
+
+	var transition *ingest.TransitionError
+	if errors.As(err, &transition) {
+		return Errorf(CodeConflict, "%s", capitalise(transition.Error())+".").
+			WithDetail("status", string(transition.From)).
+			WithRequestID(requestID(ctx))
 	}
 
 	switch {

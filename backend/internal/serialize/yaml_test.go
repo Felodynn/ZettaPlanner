@@ -309,3 +309,47 @@ func TestSlugify(t *testing.T) {
 		}
 	}
 }
+
+// TestConfidenceIsReadable guards the one number in the serialization that a
+// human eyeballs and a planner agent reasons about.
+//
+// Confidence is stored as a float32. Widening it to float64 before printing
+// turns the model's 0.9 into 0.8999999761581421, which is not what the model
+// said and invites an agent to reason about the tenth decimal place. Quoting it
+// makes it a string, which is worse: a client that parses the YAML gets text
+// where the contract promises a number.
+func TestConfidenceIsReadable(t *testing.T) {
+	b := newBuilder(diagram.LevelContext)
+	b.node("auth-service", diagram.KindService, "Auth Service", "", nil)
+	b.node("token-store", diagram.KindDatastore, "Token Store", "", nil)
+
+	nine := float32(0.9)
+	one := float32(1)
+	b.g.Nodes[0].Provenance = diagram.ProvVLMExtracted
+	b.g.Nodes[0].Confidence = &nine
+	b.g.Nodes[1].Provenance = diagram.ProvVLMExtracted
+	b.g.Nodes[1].Confidence = &one
+
+	b.edge("auth-service", "token-store", diagram.RelWritesTo, "sessions")
+	b.g.Edges[0].Provenance = diagram.ProvVLMExtracted
+	b.g.Edges[0].Confidence = &nine
+
+	out, err := serialize.Graph(b.g)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := string(out)
+
+	if strings.Contains(got, "0.8999999") {
+		t.Errorf("float32 widened to float64:\n%s", got)
+	}
+	if strings.Contains(got, `confidence: "`) {
+		t.Errorf("confidence was emitted as a string:\n%s", got)
+	}
+	if n := strings.Count(got, "confidence: 0.9"); n != 2 {
+		t.Errorf("want two `confidence: 0.9`, got %d:\n%s", n, got)
+	}
+	if !strings.Contains(got, "confidence: 1") {
+		t.Errorf("a whole-number confidence should print as 1:\n%s", got)
+	}
+}

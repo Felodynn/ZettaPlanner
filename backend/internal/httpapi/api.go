@@ -21,6 +21,7 @@ import (
 	"github.com/Felodynn/ZettaPlanner/backend/internal/llm"
 	"github.com/Felodynn/ZettaPlanner/backend/internal/service/auth"
 	diagramsvc "github.com/Felodynn/ZettaPlanner/backend/internal/service/diagram"
+	ingestsvc "github.com/Felodynn/ZettaPlanner/backend/internal/service/ingest"
 	"github.com/Felodynn/ZettaPlanner/backend/internal/service/project"
 	"github.com/Felodynn/ZettaPlanner/backend/internal/store"
 	"github.com/Felodynn/ZettaPlanner/backend/internal/telemetry"
@@ -130,6 +131,7 @@ type Deps struct {
 	Auth     *auth.Service
 	Projects *project.Service
 	Diagrams *diagramsvc.Service
+	Ingests  *ingestsvc.Service
 	Log      *slog.Logger
 	Started  time.Time
 
@@ -193,6 +195,9 @@ func New(deps Deps) *Server {
 	}
 	if deps.Diagrams != nil {
 		s.registerDiagrams()
+	}
+	if deps.Ingests != nil {
+		s.registerIngests()
 	}
 
 	// Middleware wraps the mux rather than the huma API so that it also covers

@@ -204,6 +204,37 @@ overlaps, conflicts, likely duplicates, missing pieces. A note has a `status`
 **Notes live in Postgres and in the assembled context. They are never chunked
 into the vector store.** They are structured facts, retrieved by traversal.
 
+### 3.4a Ingest: a drawing is evidence, not a statement
+
+Draw-to-product reads a photograph or a PDF into the closed vocabulary. Three
+rules define it, and all three are about not lying.
+
+**One model call per page, never one for the document,** then a **separate merge
+step**. The "continues on the next page" arrow is exactly where extraction goes
+wrong; a single call over five pages hides that inside a plausible answer. The
+merge is deterministic code, not a second model call — the judgements it faces
+are the ones §3.4 says must never be automatic. Every judgement it declines to
+make is recorded; every one it makes is flagged with the pages it drew on.
+
+**An element the model could not read is marked unreadable, never named.** It
+carries `legible: false` and whatever partial characters were visible, and it
+**cannot reach a diagram until a human supplies the name**. No threshold, no
+heuristic — a heuristic here picks confidently and wrongly, and a plausible
+invented label is worse than a blank one because nobody checks it. An arrow
+whose far end is nowhere is likewise kept as unresolved and recorded as a Note
+on accept, never drawn and never dropped: a dropped dependency is the error
+nobody notices.
+
+**Accept is additive.** A photograph is evidence that these five services
+exist; it says nothing whatsoever about the eleven already in the diagram.
+Treating its silence as a deletion would let one badly-lit page destroy an
+afternoon's architecture. Accepted elements carry `vlm_extracted` and their
+confidence; anything a human renamed carries `human_edited` and no confidence,
+because a human read it.
+
+Failure is **per page**, and so is retry. Four readable pages and one smudged
+one is a reviewable result, not a dead upload.
+
 ### 3.5 Plan: independent of the diagram
 
 ```
@@ -484,17 +515,30 @@ CREATE TABLE ingests (
   id UUID PRIMARY KEY, project_id UUID NOT NULL REFERENCES projects(id),
   status TEXT NOT NULL,          -- uploaded|extracting|merging|review|accepted|failed
   source_kind TEXT NOT NULL,     -- image|pdf
+  source_filename TEXT,
+  source_path TEXT,              -- the uploaded bytes, unmodified, kept forever
+  page_count INT NOT NULL DEFAULT 0,
+  merged JSONB,                  -- the merge step's reviewable output; written, never recomputed
   diagram_id UUID REFERENCES diagrams(id),
   actor_id UUID NOT NULL REFERENCES actors(id),
   error_class TEXT, error_detail TEXT,
-  created_at TIMESTAMPTZ NOT NULL, updated_at TIMESTAMPTZ NOT NULL
+  created_at TIMESTAMPTZ NOT NULL, updated_at TIMESTAMPTZ NOT NULL,
+  merged_at TIMESTAMPTZ, accepted_at TIMESTAMPTZ
 );
 
 CREATE TABLE ingest_pages (
   id UUID PRIMARY KEY, ingest_id UUID NOT NULL REFERENCES ingests(id),
-  page_idx INT NOT NULL, image_path TEXT NOT NULL,
-  status TEXT NOT NULL, extracted JSONB, model TEXT,
-  tokens_in INT, tokens_out INT, error_class TEXT
+  page_idx INT NOT NULL,         -- 0-based and dense; a failed page keeps its slot
+  image_path TEXT NOT NULL,
+  status TEXT NOT NULL,          -- pending|extracting|extracted|failed
+  extracted JSONB,               -- parsed and validated
+  raw_output TEXT,               -- the model's answer byte for byte, on success and failure alike
+  model TEXT,
+  tokens_in INT, tokens_out INT, duration_ms INT,
+  attempts INT NOT NULL DEFAULT 0,
+  error_class TEXT, error_detail TEXT,
+  extracted_at TIMESTAMPTZ,
+  UNIQUE (ingest_id, page_idx)
 );
 
 -- ── plan ─────────────────────────────────────────────────
@@ -837,7 +881,10 @@ GET    /api/v1/diagrams/{id}/revisions
 POST   /api/v1/diagrams/{id}/reevaluate         → creates a Proposal
 
 POST   /api/v1/projects/{pid}/ingests           multipart: images or pdf
-GET    /api/v1/ingests/{id}                     → status + per-page extraction
+GET    /api/v1/projects/{pid}/ingests
+GET    /api/v1/ingests/{id}                     → status + per-page extraction + merge
+GET    /api/v1/ingests/{id}/pages/{idx}/image   → the page the model was shown
+POST   /api/v1/ingests/{id}/pages/{idx}/retry   → re-reads one page, re-runs the merge
 POST   /api/v1/ingests/{id}/accept              → creates or updates a Diagram
 
 GET    /api/v1/projects/{pid}/milestones
@@ -1011,6 +1058,26 @@ is the same failure as the truncation it was written to catch, one level up.
 Embedding models additionally assert that the returned vector length equals the
 configured `dim` and matches the `chunks.embedding` column — a silent dimension
 change corrupts every subsequent retrieval.
+
+**Validation also reports whether the server honours `format`, because it may
+not** (D38). Measured against Ollama 0.30.11: a request carrying a JSON Schema
+in `format` is answered with a conforming object by a locally-served
+`gemma4:12b`, and with markdown prose by `gemma4:31b-cloud` and
+`glm-5.2:cloud`. The field is accepted and discarded.
+
+This is the third time the same shape has appeared — `/v1/chat/completions`
+discarding `num_ctx` (D4), `/api/ps` reporting nothing for a cloud model (D20),
+and now `format` — and it is worth stating as a rule rather than as three
+incidents: **a guarantee that holds for weights we run does not automatically
+hold for weights we rent, and the difference is silent.** Nothing in an API
+response distinguishes "enforced" from "ignored"; only a probe does.
+
+Unlike the window checks this is a **warning, not a failure**. A caller that
+needs structure states the shape in its prompt, finds the object inside whatever
+prose arrives, validates it, and retries with a teaching error — which is what
+ingest extraction does (§3.3). But "copes" is a different property from
+"guaranteed", and `zettaplanner models check` reports `format_enforced` per
+model so a deployment knows which one it has.
 
 **Fallback across `prefer` is resolved at turn boundaries only** (D22). The
 model chosen for a turn is fixed for that whole turn and recorded on

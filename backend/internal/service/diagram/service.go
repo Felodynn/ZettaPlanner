@@ -103,13 +103,17 @@ func (s *Service) requireMember(ctx context.Context, q store.Querier, p policy.P
 
 // CreateInput describes a new diagram.
 type CreateInput struct {
-	Name  string
-	Slug  string
-	Level dg.Level
+	// ProjectID is set by Create from its own argument. It is a field so that
+	// ApplyInput can carry a whole creation as one value.
+	ProjectID uuid.UUID
+	Name      string
+	Slug      string
+	Level     dg.Level
 }
 
 // Create makes an empty diagram.
 func (s *Service) Create(ctx context.Context, projectID uuid.UUID, in CreateInput, p policy.Principal) (*dg.Diagram, error) {
+	in.ProjectID = projectID
 	if err := dg.ValidateLevel(in.Level); err != nil {
 		return nil, err
 	}

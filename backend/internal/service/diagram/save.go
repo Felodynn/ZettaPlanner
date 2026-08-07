@@ -160,7 +160,7 @@ func (s *Service) Save(ctx context.Context, diagramID uuid.UUID, in SaveInput, p
 		}
 
 		nextRevision := d.CurrentRevision + 1
-		changes, err := s.applyState(ctx, tx, d, current, in, entities, p, nextRevision)
+		changes, err := s.applyState(ctx, tx, d, current, in, entities, p, nextRevision, false)
 		if err != nil {
 			return err
 		}
@@ -340,10 +340,14 @@ func changedEntity(e *dg.Entity, n NodeInput) bool {
 // ── diff and apply ───────────────────────────────────────────────────────────
 
 // applyState reconciles the stored graph with the submitted one.
+//
+// additive suppresses the removal pass: what was submitted is applied on top of
+// what is there, and nothing is deleted for being absent. That is the ingest and
+// proposal shape — a drawing says what exists, never what does not.
 func (s *Service) applyState(
 	ctx context.Context, tx pgx.Tx,
 	d *dg.Diagram, current *dg.Graph, in SaveInput,
-	entities map[string]*dg.Entity, p policy.Principal, revision int,
+	entities map[string]*dg.Entity, p policy.Principal, revision int, additive bool,
 ) (repo.RevisionChanges, error) {
 	var changes repo.RevisionChanges
 
@@ -466,6 +470,10 @@ func (s *Service) applyState(
 		changes.EdgesAdded = append(changes.EdgesAdded, key)
 	}
 
+	if additive {
+		return s.finishApply(ctx, tx, d, changes, nodeIDBySlug)
+	}
+
 	// Removals. Edges before nodes, so no edge is orphaned even for an instant.
 	for key, e := range currentEdges {
 		if desiredEdges[key] {
@@ -492,6 +500,14 @@ func (s *Service) applyState(
 		changes.NodesRemoved = append(changes.NodesRemoved, slug)
 	}
 
+	return s.finishApply(ctx, tx, d, changes, nodeIDBySlug)
+}
+
+// finishApply validates what landed and places anything new.
+func (s *Service) finishApply(
+	ctx context.Context, tx pgx.Tx, d *dg.Diagram,
+	changes repo.RevisionChanges, nodeIDBySlug map[string]uuid.UUID,
+) (repo.RevisionChanges, error) {
 	// Validate the state that actually landed, rather than the state that was
 	// asked for. Reloading catches anything the diff logic got wrong as well as
 	// anything the input did.

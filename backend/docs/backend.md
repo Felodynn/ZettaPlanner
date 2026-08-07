@@ -365,6 +365,12 @@ if you were the model.
 | D33 | **`diagrams` gains a stored `slug`** (migration 0003, contract §6.1 amended) | §6.2's document opens with `diagram: auth-context` and the git projection derives paths from it. Deriving that from the display name at serialization time makes a rename look like a delete plus an add — precisely what "stable identity in paths" exists to prevent. Same reasoning as the entity slug: assigned once, never follows the name |
 | D34 | **The closed-vocabulary `enum` stays in the OpenAPI document, and the schema-validation error is rewritten to teach** | The enum is what gives the frontend's generated client a union type instead of a string, so removing it costs real safety. But huma validates against it first and answers "validation failed" with the valid values buried in a nested array — fine for a browser, useless for a model. Phase 2 requires that error to teach because Phase 6 reads it. So the enum is kept and the message is replaced by the domain's teaching text: the same words whichever door the caller came in |
 | D35 | **One contract error code maps to exactly one HTTP status.** huma's 422 for a body-schema violation is normalised to the 400 our own `validation_failed` uses | A code that arrives as 400 sometimes and 422 other times is a special case the generated client has to carry, for no gain |
+| D36 | **Ingest accept is additive and lease-free** (`diagramsvc.ApplyInTx`), and it is a *different entry point* from the human whole-diagram save, not a flag on it | Save is a human at a canvas sending complete state: what it omits, it deletes. A drawing is evidence that these five services exist and says nothing whatsoever about the eleven already in the diagram, so treating its silence as a deletion lets one badly-lit page destroy an afternoon's architecture. Additive also removes the need for a base revision — there is nothing to be stale against when nothing is removed — and for a lease. It still writes exactly one revision and one audit row, and it still goes through the same `CheckWrite`: an ingest is not a back door around §4.2. Phase 7 reuses the same entry point for an approved proposal |
+| D37 | **The merge step is deterministic code, not a second model call** | The judgements a merge faces — is the box on page 3 the same box as page 1, where does the arrow that ran off the sheet actually go — are exactly the ones §3.4 says must never be automatic. A model asked to make them returns a confident answer over data that is already uncertain, and the second failure compounds the first with nothing left to inspect. Being pure code also makes it testable with no database and no model, which is why its rules are exercised against hand-written page disagreements. Two boxes merge only when their names normalise equal; a kind disagreement is recorded as a `Conflict` and flagged, never settled |
+| D38 | **Ollama Cloud accepts `format` and ignores it.** Startup validation probes for it and reports `format_enforced` per model; the ingest prompt restates the required shape, the parser finds the JSON object inside whatever prose arrives, and a wrong answer is retried once with the teaching error | Measured against Ollama 0.30.11 with a two-property schema: locally-served `gemma4:12b` returns a conforming object; `gemma4:31b-cloud` and `glm-5.2:cloud` both return markdown prose. **This is the third instance of one pattern** — `/v1/chat/completions` discarding `num_ctx` (D4), `/api/ps` reporting nothing for cloud (D20), `format` discarded — and it is worth stating as a rule: a guarantee that holds for weights we run does not hold for weights we rent, and nothing in the response says which you got. It found a real bug the same day: the first cloud extraction returned three arrows, zero boxes, and a key called `boxes`, and the decoder reported success. A warning rather than a failure, because the harness copes — but `models check` says which behaviour a deployment has, because "copes" and "guaranteed" are different properties |
+| D39 | **`ingest_pages.raw_output` stores the model's answer byte for byte, on success and on failure.** `extracted` is not a substitute | `extracted` is JSONB reached through a Go struct: keys reordered, unknown fields dropped, an undecodable array turned into `null`. Each of those destroys the answer to "what did the model actually say", which is the only question worth asking when an extraction is wrong — and it was the reason D38 took an extra hour to find, because the stored "raw" output was our own re-marshal showing `nodes: null` when the model had never used that key. Stored on failure too: a malformed answer is the one you most want to read |
+| D40 | **An extraction with no nodes is a failure, not an empty page.** `error_class: no_nodes`, retried once with a correction naming the key | Every arrow starts and ends at a box, so a page with arrows has boxes. Reporting success over a payload containing nothing makes an empty result and a correct one indistinguishable, which is how a user ends up accepting a diagram with seven arrows and no services in it. Paired with the hard gate on illegible elements, this is the phase's general rule: **the harness never lets "the model said nothing useful" look like "there was nothing to say"** |
+| Q3 | **Answered: per-page wins, and not narrowly** | Same schema, same rules, same model, same three pages. Per-page: 7 nodes, 7 edges, correct kinds, both dangling arrows flagged. Whole-document, three trials: **0 nodes every time**, 7 edges every time, and an invented `unknown_destination` endpoint. The failure is not "worse cross-page linking" as assumed — the model stops emitting the first array altogether once the input is multi-image, so there is nothing for the edges to attach to. Whole-document is cheaper in input tokens (1,605 against 3,840, since the images share one prompt) and the output is unusable. Latency on the real cloud model was 7–10s per page. The one thing per-page genuinely loses is that whole-document *did* join `auth_service → token_store` across the page break; per-page could not, and correctly recorded it as unresolved rather than guessing |
 | Q6 | **Lease TTL 5 minutes, heartbeat 60 seconds** — answered, and due to be revisited in dogfood | Long enough to survive a screen lock, a network blip, or a lid closed while somebody answers the door; short enough that a browser killed mid-edit does not hold a diagram for an afternoon. A sleeping laptop loses its lease, which is the correct outcome — the alternative is a diagram nobody can touch because of a machine that is not coming back. The TTL is published in the acquire response so the frontend does not hard-code a number that later disagrees with the server |
 
 **Notes**
@@ -423,14 +429,46 @@ curl /api/v1/diagrams/{did}/yaml   # read it: does it describe your drawing?
 ```
 
 **Exit criteria:**
-- [ ] Per-page extraction; merge is a separate reviewable step
-- [ ] Every extracted element carries provenance `vlm_extracted` and a confidence
-- [ ] Unreadable elements are marked low-confidence, never invented
-- [ ] Extraction confined to the closed vocabulary
-- [ ] Malformed model output fails the page, not the ingest; retry is per-page
-- [ ] Raw per-page output retained
+- [x] Per-page extraction; merge is a separate reviewable step
+- [x] Every extracted element carries provenance `vlm_extracted` and a confidence
+- [x] Unreadable elements are marked low-confidence, never invented
+- [x] Extraction confined to the closed vocabulary
+- [x] Malformed model output fails the page, not the ingest; retry is per-page
+- [x] Raw per-page output retained
 - [ ] A real notebook photograph produces a diagram you would correct rather than
-      discard
+      discard — **outstanding: needs an actual photograph.** Verified instead
+      against a generated 3-page PDF with an arrow crossing pages and an arrow
+      into a question mark, on the real `gemma4:31b-cloud`: 7 entities, correct
+      kinds including `external_system` inferred from "third party, not ours",
+      `auth-service` recognised as one identity across all three pages, and both
+      dangling arrows flagged rather than guessed or dropped. Held open
+      deliberately — a clean render is not a notebook, and the criterion says
+      notebook. Closed in dogfood (Phase 9), which requires the same thing
+
+**Notes on what was built:**
+
+- **The merge is deterministic code, not a second model call** (D37). Pure, no
+  database and no clock, so its rules are testable against a hand-written
+  five-page disagreement rather than against a photograph having a bad day.
+- Extraction runs in the **background**, not in the request. Four pages of a PDF
+  is minutes of model time, and a request holding a connection open that long
+  dies to the first proxy timeout leaving no record of how far it got. The
+  ingest row is the record; Phase 5 replaces polling with `ingest.progress`.
+  The goroutine deliberately does not use the request context — that is
+  cancelled the instant the 201 is written — but does carry its request id, so
+  `ingest.created` and `ingest.merged` group in the audit log.
+- A killed process leaves ingests claiming to be in flight. A **boot sweep**
+  marks them failed with `error_class: interrupted`; the pages already read are
+  kept and the rest are retried by hand. Not restarted automatically: that
+  spends model budget on work nobody is waiting for any more.
+- **EXIF orientation is applied before anything else.** A phone stores a
+  portrait photograph landscape with the rotation only in the metadata, Go's
+  decoders ignore the flag, and a sideways page is not a page a model reads
+  badly — it is a page it reads as a different drawing. Hand-rolled for the one
+  tag; a full EXIF parser is mostly metadata that has no business near a prompt.
+- Uploading needs only membership; **accepting needs diagram authority**. A
+  photograph binds nobody to anything, and applying it to the architecture is
+  the write. Same split as a worklog.
 
 ---
 
@@ -737,7 +775,7 @@ harness and got lucky*.
 |---|---|---|
 | Q1 | Does the planner need a separate cheap model for digest refresh? | Phase 5, measure both |
 | Q2 | Optimal chunk size and overlap for worklog spill | Phase 5, measure |
-| Q3 | Does per-page VLM extraction beat whole-document on multi-page PDFs, and by how much? | Phase 3, measure — the assumption is stated, not proven |
+| ~~Q3~~ | ~~Does per-page VLM extraction beat whole-document on multi-page PDFs?~~ | **Answered in Phase 3 (see D-table).** Whole-document returned 0 nodes in 3 of 3 trials against the same schema per-page handles correctly |
 | Q4 | Is one retry enough for `tool_parse`, or does it need two with backoff? | Phase 6, from error-class data |
 | Q5 | Should item-scoped threads have their own context skeleton, or share the project one? | Phase 6 |
 | Q6 | Lease TTL and heartbeat interval that survive a laptop sleeping | Phase 2, then revisit in dogfood |

@@ -130,7 +130,7 @@ func nodeMapping(n *diagram.Node) *yaml.Node {
 	// human corrected is the highest-signal feedback it will ever get.
 	put(m, "provenance", scalar(string(n.Provenance)))
 	if n.Confidence != nil {
-		put(m, "confidence", scalar(formatFloat(float64(*n.Confidence))))
+		put(m, "confidence", confidenceNode(*n.Confidence))
 	}
 	if attrs := attrsMapping(mergeAttrs(n.Entity.Attrs, n.Attrs)); attrs != nil {
 		put(m, "attrs", attrs)
@@ -183,7 +183,7 @@ func edgeMapping(from, to *diagram.Node, e *diagram.Edge) *yaml.Node {
 	}
 	put(m, "provenance", scalar(string(e.Provenance)))
 	if e.Confidence != nil {
-		put(m, "confidence", scalar(formatFloat(float64(*e.Confidence))))
+		put(m, "confidence", confidenceNode(*e.Confidence))
 	}
 	if attrs := attrsMapping(e.Attrs); attrs != nil {
 		put(m, "attrs", attrs)
@@ -314,6 +314,21 @@ func formatFloat(f float64) string {
 		return strconv.FormatInt(int64(f), 10)
 	}
 	return strconv.FormatFloat(f, 'g', -1, 64)
+}
+
+// confidenceNode renders a vision model's certainty.
+//
+// Formatted at float32 precision and emitted as a number, not a quoted string.
+// Confidence is stored as a float32, and widening it to float64 before printing
+// turns 0.9 into 0.8999999761581421 — which is not what the model said, is
+// unreadable at a glance, and is the sort of thing a planner agent will happily
+// reason about the tenth decimal place of.
+func confidenceNode(c float32) *yaml.Node {
+	f := float64(c)
+	if f == math.Trunc(f) {
+		return scalarTagged(strconv.FormatInt(int64(f), 10), "!!int")
+	}
+	return scalarTagged(strconv.FormatFloat(f, 'g', -1, 32), "!!float")
 }
 
 func numberTag(f float64) string {

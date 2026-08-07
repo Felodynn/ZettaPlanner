@@ -66,6 +66,13 @@ func NodeKinds() []NodeKind {
 // Valid reports whether k is in the closed set.
 func (k NodeKind) Valid() bool { _, ok := nodeKindMeaning[k]; return ok }
 
+// NodeKindMeaning returns the one-line gloss for a kind.
+//
+// Exported because the ingest prompt teaches the vocabulary to the vision model
+// with the same words the validation error uses. Two hand-written copies of this
+// table would diverge, and the copy that diverged would be the prompt.
+func NodeKindMeaning(k NodeKind) string { return nodeKindMeaning[k] }
+
 func (k NodeKind) String() string { return string(k) }
 
 // CanContain reports whether a node of this kind may be a containment parent.
@@ -110,6 +117,9 @@ func Relations() []Relation {
 
 // Valid reports whether r is in the closed set.
 func (r Relation) Valid() bool { _, ok := relationMeaning[r]; return ok }
+
+// RelationMeaning returns the one-line gloss for a relation.
+func RelationMeaning(r Relation) string { return relationMeaning[r] }
 
 func (r Relation) String() string { return string(r) }
 
