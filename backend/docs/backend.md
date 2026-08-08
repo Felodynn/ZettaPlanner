@@ -78,8 +78,9 @@ internal/
   policy/                  roles, field ownership, denial text
   service/                 orchestration; owns transactions
     auth/ project/ diagram/ ingest/ plan/ contextsvc/ thread/ proposal/ export/
-  agent/                   loop, tools, turn lease, streaming
-    tools/                 one file per tool
+                           (thread/ owns conversations, the turn queue, and the
+                            read side of governance)
+  agent/                   loop, tools, turn lease, limits, retry, trace
   contextbuild/            skeleton, expansion, spill, digest — pure, no I/O
   vector/                  the similarity boundary (§6.4); no SQL
   llm/                     ollama client, registry, error normalisation
@@ -385,6 +386,10 @@ if you were the model.
 | D47 | **Spill is embedded inside the transaction that wrote the source row. A configured-and-failing embedder fails the write** | §6.3 says embed on write, in the same transaction. The reason is that the alternative — commit now, index shortly — produces a worklog that exists and is invisible to retrieval, and *nothing downstream can distinguish that state from "there was nothing relevant"*. A backfill job would be a second source of truth about what has been indexed. The uncomfortable half is stated rather than hidden: a worklog write now depends on the embedding model answering. **Not configured** and **configured and broken** are deliberately different — with no embedder the write succeeds and the assembled context says layer 3 is unavailable; with a broken one the write fails and says why. Worth revisiting in dogfood: if a local Ollama hiccup blocks note-taking often enough to change behaviour, the tradeoff is wrong |
 | D48 | **Digest model-field staleness is derived from the project's `audit_log` count, not set by a flag** | `model_fields_stale` as a flag is correct until the fourteenth write path forgets to set it, and the failure is invisible — a stale hypothesis presented as current. The log is append-only and nothing is ever deleted from it (§6.5), so its count for a project only rises: recording the mark when the model wrote makes "has the graph moved since" a comparison. Stale means dated, not wrong, so the fields are kept — the `dead_ends` are the most valuable thing in them. And a project where no model has written yet is **not** stale: a staleness badge over an empty panel teaches people to ignore the badge |
 | D49 | **A similarity search across two embedding models is an error, never a filter** | Filtering to the rows that happen to match would answer a question about ten thousand chunks using the eleven in the right space, and report success — and the answers would be plausible, which is what makes it the worst available behaviour. `chunks.model` is per row precisely so a half-migrated corpus is detectable; the refusal names both models and says to re-embed |
+| D50 | **Each write tool declares the object it writes, and the "no path to a manager-owned field" test is generated from the ownership table** | The first version of that test was a hand-written list of manager-owned names checked against every write tool's schema, and it failed immediately on `add_subtask` accepting `title` — because `title` is manager-owned on a WorkItem and dev-owned on a SubTask. The hand-written list was not wrong about §4.2, it was wrong about *which object*. Making the tool name its object turns the check into a question the table can answer, including for `update_dev_field`, whose boundary lives in an enum rather than in a property name. A field moved between columns tomorrow is covered tomorrow |
+| D51 | **The SSE hub keeps a bounded in-memory ring per project and emits `resync` when a client's gap exceeds it** | §7.2 says `Last-Event-ID` is honoured "where it can be" and `resync` otherwise, which is a design, not a hedge. These events are notifications about facts that are already durable in Postgres; persisting a second copy would create a second thing that can disagree with the first. A restart drops the ring and every client resyncs, which is the correct answer after a restart. Two details earned their own thought: a client that sends `Last-Event-ID: 0` has seen nothing and wants everything, which is **not** the same as a client that sends no header and has missed nothing — collapsing them loses a reconnecting client's whole gap. And a subscriber whose buffer is full is dropped rather than blocked, because holding a turn's progress hostage to a wedged browser tab is not a trade anybody wants |
+| D52 | **A turn that did not succeed posts the harness's verdict into the thread alongside the model's summary** | Found by the test, then seen for real: a `no_output` turn ends with a confident summary — "I looked at the plan and everything seems fine" — and posting only that is indistinguishable from a turn that did the work. So both go in: what the model said it did, and what actually happened. The verdict names the finish reason and, for `no_output`, says plainly that nothing was written, proposed or handed back and that `zettaplanner trace` shows why |
+| D53 | **`turn_events` is append-only by trigger, and separate from `audit_log`** | The audit log is the permanent record of what changed (§6.5) and may never be pruned. The trace is diagnostic: what the *model* did, including the calls that changed nothing and the ones that failed. Mixing them would either pollute the export with retries or lose the retries entirely. Append-only for the same reason as the audit log, because "what actually happened" is not a question a rewritable table can answer — and separate so a later version can prune it by age without touching anything the retrospective reads |
 | Q3 | **Answered: per-page wins, and not narrowly** | Same schema, same rules, same model, same three pages. Per-page: 7 nodes, 7 edges, correct kinds, both dangling arrows flagged. Whole-document, three trials: **0 nodes every time**, 7 edges every time, and an invented `unknown_destination` endpoint. The failure is not "worse cross-page linking" as assumed — the model stops emitting the first array altogether once the input is multi-image, so there is nothing for the edges to attach to. Whole-document is cheaper in input tokens (1,605 against 3,840, since the images share one prompt) and the output is unusable. Latency on the real cloud model was 7–10s per page. The one thing per-page genuinely loses is that whole-document *did* join `auth_service → token_store` across the page break; per-page could not, and correctly recorded it as unresolved rather than guessing |
 | Q6 | **Lease TTL 5 minutes, heartbeat 60 seconds** — answered, and due to be revisited in dogfood | Long enough to survive a screen lock, a network blip, or a lid closed while somebody answers the door; short enough that a browser killed mid-edit does not hold a diagram for an afternoon. A sleeping laptop loses its lease, which is the correct outcome — the alternative is a diagram nobody can touch because of a machine that is not coming back. The TTL is published in the acquire response so the frontend does not hard-code a number that later disagrees with the server |
 
@@ -714,16 +719,43 @@ zettaplanner trace <turn_id>
 ```
 
 **Exit criteria:**
-- [ ] Manager-owned changes always produce proposals; no path to a direct write
-- [ ] Dev-owned writes on the requester's own items land directly, with
+- [x] Manager-owned changes always produce proposals; no path to a direct write
+- [x] Dev-owned writes on the requester's own items land directly, with
       `agent_committed` provenance and an audit row naming both agent and user
-- [ ] Turns serialize per project; a second request queues visibly
-- [ ] Transient classes retried once; boundary and validation never retried
-- [ ] A turn producing nothing reports `no_output`, not success
-- [ ] Denials name the boundary and the route; repeats escalate
-- [ ] All three hard limits enforced independently
-- [ ] `trace` replays every turn and tool call
-- [ ] Streaming survives a client reconnect with `Last-Event-ID`
+- [x] Turns serialize per project; a second request queues visibly
+- [x] Transient classes retried once; boundary and validation never retried
+- [x] A turn producing nothing reports `no_output`, not success
+- [x] Denials name the boundary and the route; repeats escalate
+- [x] All three hard limits enforced independently
+- [x] `trace` replays every turn and tool call
+- [x] Streaming survives a client reconnect with `Last-Event-ID`
+
+**Notes on what was built:**
+
+- **The inventory check is generated from the ownership table** (D50). Each
+  write tool declares the object it writes; a test then asserts that every field
+  its schema accepts — including the values of `update_dev_field`'s `field`
+  enum — is dev-owned for that object. A field moved from one column of §4.2 to
+  the other tomorrow is covered by that test tomorrow, with nobody remembering
+  to extend it.
+- **A `no_output` turn posts two messages, not one** (D52). The model's summary
+  and the harness's verdict. A turn that produced nothing very often ends with a
+  confident summary — the manual run's *"I looked at the plan and everything
+  seems fine"* — and posting that alone is exactly the failure this phase exists
+  to close.
+- **Serialization is the partial unique index from migration 0001**, not a
+  mutex. `FOR UPDATE SKIP LOCKED` on the claim keeps the queue moving; the index
+  rejects whichever runner would have been the second. Both are needed, and both
+  survive the process being run twice.
+- **The SSE hub is in memory, and says so when it cannot replay.** The events
+  are notifications about facts that are already durable; a second copy in
+  Postgres would be a second thing that can disagree. A client whose gap is
+  wider than the ring gets `resync` rather than a silent resume from a hole, and
+  an absent `Last-Event-ID` is deliberately distinguished from `0`.
+- Measured on the real `glm-5.2:cloud`: **7 turns, 0 retries, 2–4 steps each,
+  3–5 seconds per model call.** The four manual prompts all behaved as specified
+  on the first attempt, including the unscripted *"delete every work item in
+  this project"*, which produced a proposal rather than a deletion.
 
 ---
 

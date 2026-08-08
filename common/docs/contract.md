@@ -426,8 +426,69 @@ while a turn is running is **queued and shown as queued**, never run
 concurrently — two turns writing to the same plan produce interleaved changes
 with no coherent audit story.
 
+The invariant is a database constraint, not a mutex: `agent_turns` carries a
+unique partial index on `(project_id) WHERE status = 'running'`, so two
+processes racing to start a turn cannot both win. A mutex would hold only inside
+one process, and this system is meant to survive being run twice.
+
+**The message always lands.** Posting and running are separate: the message is
+written immediately and the turn queues behind whatever else is running. A user
+whose message is refused because an agent is busy learns to wait before typing,
+which is the opposite of a transcript.
+
 Turn leases expire on heartbeat failure. An expired turn is marked `abandoned`
-and its partial output is retained as transcript but applies nothing.
+and its partial output is retained as transcript but applies nothing. It is not
+restarted: a turn nobody is waiting for any more is model budget spent on an
+answer nobody will read.
+
+**Anybody on the project may cancel a turn**, not only whoever started it — a
+turn holds the project's only slot, and requiring its author to be present is
+how a queue stays blocked all afternoon. `cancelled` is its own outcome, not a
+flavour of `failed`: a user who stops a turn did not hit a bug, and a
+retrospective counting failures should not count their interruptions among them.
+
+### 5.3a What a turn may do
+
+The tool inventory is the enforcement mechanism, not prompt instruction.
+
+```
+read-only:   get_plan, get_item, get_diagram, get_entity, search_worklogs,
+             list_notes, list_deviations, get_digest
+write:       update_dev_field, add_worklog, add_subtask, check_item
+propose:     propose_plan_change, propose_diagram_change, add_note
+control:     handoff_to_human, finish
+```
+
+**There is no tool that writes a manager-owned field.** Not one that refuses —
+one that does not exist. `update_dev_field` is the only write path onto a work
+item and it resolves the field through §4.2 with the requesting user's
+assignment, so even it cannot reach one. A prompt saying "do not change due
+dates" is a request; an inventory without such a tool is a fact, and it holds
+when the model is confused, adversarial, or reading a system prompt that got
+truncated.
+
+An agent acts with the **requesting user's** permissions and no more (D11).
+Every write it makes carries provenance `agent_committed` and an audit row
+naming both the agent and the person who asked.
+
+**A turn that produced nothing is not a success.** No write, no proposal and no
+`handoff_to_human` ends the turn as `no_output` — a distinct, non-success
+outcome that the API reports and the transcript states. A run that anticipates a
+wall and stops looks identical to a completed one otherwise.
+
+Three ceilings are enforced independently, whichever trips first: `MaxTurns 40`,
+`MaxTokens 300_000`, `MaxWallClock 15m`. Which one tripped is recorded, because
+they call for different fixes.
+
+**Every model call, tool call, denial and retry is persisted** to `turn_events`,
+which is append-only. `zettaplanner trace <turn_id>` replays it. Messages carry
+the conversation; they do not carry what happened *between* messages, and a
+model call that came back unparseable and was retried leaves no message at all
+— which is exactly the event worth reading when a turn behaved oddly.
+
+Only the transient error classes are retried, exactly once: `tool_parse`,
+`server`, `timeout`. A `boundary` or `validation_failed` retried is a refusal
+rephrased, not a problem solved.
 
 ### 5.4 Re-evaluate
 
@@ -684,16 +745,39 @@ CREATE TABLE agent_turns (
   id UUID PRIMARY KEY, project_id UUID NOT NULL REFERENCES projects(id),
   thread_id UUID NOT NULL REFERENCES threads(id),
   requested_by UUID NOT NULL REFERENCES users(id),
-  status TEXT NOT NULL,                       -- queued|running|complete|failed|abandoned
+  message_id UUID REFERENCES messages(id),    -- the prompt that triggered it
+  status TEXT NOT NULL,                       -- queued|running|complete|failed|abandoned|cancelled
+  finish_reason TEXT,                         -- finished|no_output|max_turns|max_tokens|
+                                              -- max_wall_clock|error|cancelled|abandoned
   model TEXT, tokens_in INT, tokens_out INT, turns INT,
-  error_class TEXT, heartbeat_at TIMESTAMPTZ,
-  started_at TIMESTAMPTZ, ended_at TIMESTAMPTZ
+  retries INT NOT NULL DEFAULT 0, wall_ms INT,
+  error_class TEXT, error_detail TEXT, heartbeat_at TIMESTAMPTZ,
+  queued_at TIMESTAMPTZ, started_at TIMESTAMPTZ, ended_at TIMESTAMPTZ
+);
+-- One running turn per project (§5.3), as a constraint rather than a mutex.
+CREATE UNIQUE INDEX agent_turns_one_running ON agent_turns (project_id) WHERE status = 'running';
+
+-- The trace behind `zettaplanner trace <turn_id>`. Append-only, enforced by a
+-- trigger: a trace that can be rewritten is not evidence. Diagnostic rather
+-- than permanent — scoped to a turn, and prunable by age in a later version,
+-- which audit_log may never be.
+CREATE TABLE turn_events (
+  id UUID PRIMARY KEY, turn_id UUID NOT NULL REFERENCES agent_turns(id),
+  seq INT NOT NULL,
+  kind TEXT NOT NULL,        -- model_call|model_error|model_retry|tool_call|tool_result|
+                             -- tool_denied|tool_unknown|limit|note
+  subject TEXT NOT NULL DEFAULT '', detail JSONB NOT NULL DEFAULT '{}',
+  error_class TEXT, duration_ms INT, tokens_in INT, tokens_out INT,
+  at TIMESTAMPTZ NOT NULL,
+  UNIQUE (turn_id, seq)
 );
 
 -- ── governance ───────────────────────────────────────────
 CREATE TABLE proposals (
   id UUID PRIMARY KEY, project_id UUID NOT NULL REFERENCES projects(id),
-  actor_id UUID NOT NULL REFERENCES actors(id), turn_id UUID,
+  actor_id UUID NOT NULL REFERENCES actors(id),
+  on_behalf_of UUID REFERENCES users(id),     -- the instructing user, when an agent raised it
+  turn_id UUID REFERENCES agent_turns(id),
   title TEXT NOT NULL, rationale TEXT NOT NULL,
   target_kind TEXT NOT NULL,                  -- diagram | plan | mixed
   status TEXT NOT NULL,                       -- pending|approved|rejected|superseded
@@ -1002,10 +1086,13 @@ DELETE /api/v1/deviations/{id}                  → soft
 GET    /api/v1/projects/{pid}/warnings          → dependency/date violations
 
 GET    /api/v1/projects/{pid}/threads
-GET    /api/v1/threads/{id}/messages            ?before=&limit=
-POST   /api/v1/threads/{id}/messages            → enqueues a turn
+POST   /api/v1/projects/{pid}/threads           → opens the thread for a scope; idempotent
+GET    /api/v1/threads/{id}/messages            ?before=&limit=&turn=
+POST   /api/v1/threads/{id}/messages            → enqueues a turn; response carries its queue position
+GET    /api/v1/projects/{pid}/turns             ?limit=
+GET    /api/v1/turns/{id}                       → status, finish_reason, cost
 GET    /api/v1/projects/{pid}/events            → SSE (§7.2)
-POST   /api/v1/turns/{id}/cancel
+POST   /api/v1/turns/{id}/cancel                → any project member may
 
 GET    /api/v1/projects/{pid}/proposals         ?status=
 GET    /api/v1/proposals/{id}                   → changes + current conflicts

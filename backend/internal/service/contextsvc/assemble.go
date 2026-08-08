@@ -447,6 +447,27 @@ func (s *Service) spill(ctx context.Context, q store.Querier, projectID uuid.UUI
 	return out, nil
 }
 
+// SearchSpill runs layer 3 on its own, for the agent's `search_worklogs` tool.
+//
+// Returns the reason as a second value rather than an error when there is
+// nothing to search: "no embedding model is configured" is an answer the model
+// should read and stop asking about, not a failure that ends its turn.
+func (s *Service) SearchSpill(ctx context.Context, projectID uuid.UUID, query string, limit int, p policy.Principal) ([]contextbuild.SpillHit, string, error) {
+	var out contextbuild.Spill
+	err := s.db.InTx(ctx, func(tx pgx.Tx) error {
+		if err := s.requireMember(ctx, tx, p, projectID); err != nil {
+			return err
+		}
+		var err error
+		out, err = s.spill(ctx, tx, projectID, Request{Message: query, MaxSpill: limit})
+		return err
+	})
+	if err != nil {
+		return nil, "", err
+	}
+	return out.Hits, out.Unavailable, nil
+}
+
 // labelSources turns a source id into the sentence a reader needs to place the
 // passage: what it was, on which item, by whom, when.
 func (s *Service) labelSources(ctx context.Context, q store.Querier, hits []vector.Hit) (map[uuid.UUID]string, error) {

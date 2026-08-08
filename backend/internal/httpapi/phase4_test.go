@@ -30,7 +30,13 @@ type planFixture struct {
 
 func newPlanFixture(t *testing.T) *planFixture {
 	t.Helper()
-	h := newHarness(t)
+	return buildPlanFixture(t, newHarness(t))
+}
+
+// buildPlanFixture populates an existing harness, so the Phase 6 tests can
+// stand the same project up behind a server that also has an agent wired in.
+func buildPlanFixture(t *testing.T, h *harness) *planFixture {
+	t.Helper()
 	admin := h.bootstrapAdmin()
 	mgr := admin.createUser("mgr@plan.test", "Manager", policy.RoleManager)
 	dev := admin.createUser("dev@plan.test", "Dev", policy.RoleDeveloper)

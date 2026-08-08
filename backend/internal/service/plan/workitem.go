@@ -87,6 +87,30 @@ func (s *Service) GetWorkItem(ctx context.Context, id uuid.UUID, p policy.Princi
 	return out, nil
 }
 
+// ItemByRef resolves a work item by its human-facing ref within a project.
+//
+// The agent and the CLI both address items the way people do — ZP-14 — and a
+// surface that only accepts UUIDs forces every caller to keep a lookup table
+// that this one already is.
+func (s *Service) ItemByRef(ctx context.Context, projectID uuid.UUID, ref string, p policy.Principal) (*ItemDetail, error) {
+	var out *ItemDetail
+	err := s.db.InTx(ctx, func(tx pgx.Tx) error {
+		if err := s.requireMember(ctx, tx, p, projectID); err != nil {
+			return err
+		}
+		item, err := s.items.ByRef(ctx, tx, projectID, strings.ToUpper(strings.TrimSpace(ref)))
+		if err != nil {
+			return err
+		}
+		out, err = s.loadDetail(ctx, tx, item)
+		return err
+	})
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 func (s *Service) loadDetail(ctx context.Context, q store.Querier, item *pl.WorkItem) (*ItemDetail, error) {
 	d := &ItemDetail{Item: item}
 

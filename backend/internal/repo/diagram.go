@@ -39,6 +39,13 @@ func (Diagrams) ByID(ctx context.Context, q store.Querier, id uuid.UUID) (*diagr
 }
 
 // ListByProject returns a project's live diagrams.
+// BySlug resolves a diagram by its stable slug within a project.
+func (Diagrams) BySlug(ctx context.Context, q store.Querier, projectID uuid.UUID, slug string) (*diagram.Diagram, error) {
+	const sql = `SELECT ` + diagramColumns + ` FROM diagrams
+	              WHERE project_id = $1 AND slug = $2 AND deleted_at IS NULL`
+	return scanDiagram(q.QueryRow(ctx, sql, projectID, slug))
+}
+
 func (Diagrams) ListByProject(ctx context.Context, q store.Querier, projectID uuid.UUID) ([]*diagram.Diagram, error) {
 	const sql = `SELECT ` + diagramColumns + `
 	               FROM diagrams WHERE project_id = $1 AND deleted_at IS NULL

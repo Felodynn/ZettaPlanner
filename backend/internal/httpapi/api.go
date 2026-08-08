@@ -13,6 +13,7 @@ import (
 	"log/slog"
 	"net/http"
 	"sort"
+	"sync"
 	"time"
 
 	"github.com/danielgtaylor/huma/v2"
@@ -25,6 +26,7 @@ import (
 	ingestsvc "github.com/Felodynn/ZettaPlanner/backend/internal/service/ingest"
 	plansvc "github.com/Felodynn/ZettaPlanner/backend/internal/service/plan"
 	"github.com/Felodynn/ZettaPlanner/backend/internal/service/project"
+	threadsvc "github.com/Felodynn/ZettaPlanner/backend/internal/service/thread"
 	"github.com/Felodynn/ZettaPlanner/backend/internal/store"
 	"github.com/Felodynn/ZettaPlanner/backend/internal/telemetry"
 )
@@ -146,8 +148,14 @@ type Deps struct {
 	Ingests  *ingestsvc.Service
 	Plan     *plansvc.Service
 	Context  *contextsvc.Service
-	Log      *slog.Logger
-	Started  time.Time
+	Threads  *threadsvc.Service
+
+	// Events is the SSE fan-out. Constructed by the caller because the agent
+	// runner and the thread service publish into it and are built before the
+	// server is. Nil means a hub is made here and nothing else can publish.
+	Events  *EventHub
+	Log     *slog.Logger
+	Started time.Time
 
 	// SecureCookies marks the session cookie Secure. Configuration rather than
 	// a constant because development runs on plain http, and a cookie the
@@ -166,7 +174,21 @@ type Server struct {
 	Handler http.Handler
 	API     huma.API
 	deps    Deps
+
+	// events is the per-project SSE fan-out (§7.2). Always constructed, so a
+	// caller may publish into it before deciding whether to serve the stream.
+	events *EventHub
+	// shutdown closes every live stream when the process is going away, rather
+	// than leaving clients waiting on a socket nothing will ever write to.
+	shutdown  chan struct{}
+	closeOnce sync.Once
 }
+
+// Events is the hub the services publish into.
+func (s *Server) Events() *EventHub { return s.events }
+
+// Close ends every live event stream. Idempotent.
+func (s *Server) Close() { s.closeOnce.Do(func() { close(s.shutdown) }) }
 
 // New builds the router, registers every operation, and returns the server.
 func New(deps Deps) *Server {
@@ -197,7 +219,10 @@ func New(deps Deps) *Server {
 	cfg.SchemasPath = ""
 
 	api := humago.New(mux, cfg)
-	s := &Server{API: api, deps: deps}
+	if deps.Events == nil {
+		deps.Events = NewEventHub()
+	}
+	s := &Server{API: api, deps: deps, events: deps.Events, shutdown: make(chan struct{})}
 
 	s.registerHealth()
 	if deps.Auth != nil {
@@ -218,6 +243,13 @@ func New(deps Deps) *Server {
 	}
 	if deps.Context != nil {
 		s.registerDigest()
+	}
+	if deps.Threads != nil {
+		s.registerThreads()
+		// Registered on the mux directly: a long-lived text/event-stream is not
+		// a request/response operation, and describing it as one in the OpenAPI
+		// document would generate a client method that hangs.
+		s.registerEvents(mux)
 	}
 
 	// Middleware wraps the mux rather than the huma API so that it also covers

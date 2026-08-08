@@ -13,6 +13,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/Felodynn/ZettaPlanner/backend/internal/agent"
 	"github.com/Felodynn/ZettaPlanner/backend/internal/config"
 	"github.com/Felodynn/ZettaPlanner/backend/internal/httpapi"
 	"github.com/Felodynn/ZettaPlanner/backend/internal/llm"
@@ -22,6 +23,7 @@ import (
 	ingestsvc "github.com/Felodynn/ZettaPlanner/backend/internal/service/ingest"
 	plansvc "github.com/Felodynn/ZettaPlanner/backend/internal/service/plan"
 	"github.com/Felodynn/ZettaPlanner/backend/internal/service/project"
+	threadsvc "github.com/Felodynn/ZettaPlanner/backend/internal/service/thread"
 	"github.com/Felodynn/ZettaPlanner/backend/internal/store"
 	"github.com/Felodynn/ZettaPlanner/backend/internal/telemetry"
 )
@@ -91,6 +93,25 @@ func cmdServe(ctx context.Context, args []string) error {
 	contextSvc := contextsvc.New(db, log, registry)
 	planSvc := plansvc.New(db, log, contextSvc)
 
+	// The hub is built here rather than by the server: the agent runner and the
+	// thread service publish into it and both exist before the server does.
+	events := httpapi.NewEventHub()
+	runner := agent.New(agent.Deps{
+		DB: db, Log: log, Registry: registry,
+		Context: contextSvc, Plan: planSvc, Diagrams: diagramSvc, Events: events,
+	})
+	threadSvc := threadsvc.New(db, log, runner, events)
+
+	// A turn left running by a killed process blocks its project's queue until
+	// the lease would lapse, and after a restart nothing is going to heartbeat
+	// it. Swept once at boot, before anything can look.
+	if n, err := runner.RecoverInterrupted(requestCtx); err != nil {
+		log.WarnContext(requestCtx, "could not sweep interrupted turns", "error", err)
+	} else if n > 0 {
+		log.WarnContext(requestCtx, "turns abandoned at boot; their processes did not survive", "count", n)
+	}
+	runner.Start(requestCtx)
+
 	// An ingest left mid-flight by a killed process is indistinguishable from
 	// one still working, and the difference matters to whoever is waiting for
 	// it. Swept once at boot, before anything can look.
@@ -107,6 +128,8 @@ func cmdServe(ctx context.Context, args []string) error {
 		Ingests:       ingestSvc,
 		Plan:          planSvc,
 		Context:       contextSvc,
+		Threads:       threadSvc,
+		Events:        events,
 		Log:           log,
 		Started:       time.Now(),
 		SecureCookies: cfg.SecureCookies,
@@ -136,9 +159,17 @@ func cmdServe(ctx context.Context, args []string) error {
 		log.Info("shutting down")
 		shutdownCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 20*time.Second)
 		defer cancel()
+		// Close the event streams first: they are long-lived by design, and
+		// http.Server.Shutdown waits for every in-flight request, which for an
+		// SSE connection means forever.
+		srv.Close()
 		if err := httpSrv.Shutdown(shutdownCtx); err != nil {
 			return err
 		}
+		// A turn in flight is finished rather than killed. One cut mid-write
+		// leaves a proposal half raised, and the whole point of the lease is
+		// that somebody can tell afterwards what happened.
+		runner.Stop()
 		// Background extraction outlives the request that started it, so the
 		// process has to outlive the extraction. Cut short, it leaves pages
 		// claimed and an ingest stuck in `extracting` for the recovery sweep to

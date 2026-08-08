@@ -156,6 +156,18 @@ func (s *Service) Create(ctx context.Context, projectID uuid.UUID, in CreateInpu
 }
 
 // List returns a project's diagrams.
+// BySlug resolves a diagram by its stable slug within a project.
+//
+// The slug rather than the name, because the slug is the identity that does not
+// follow a rename (D33) — an agent that learned "auth-context" from a serialized
+// document must still find it after somebody retitles the diagram.
+func (s *Service) BySlug(ctx context.Context, projectID uuid.UUID, slug string, p policy.Principal) (*dg.Diagram, error) {
+	if _, err := s.requireMember(ctx, s.db.Pool, p, projectID); err != nil {
+		return nil, err
+	}
+	return s.diagrams.BySlug(ctx, s.db.Pool, projectID, slug)
+}
+
 func (s *Service) List(ctx context.Context, projectID uuid.UUID, p policy.Principal) ([]*dg.Diagram, error) {
 	if _, err := s.requireMember(ctx, s.db.Pool, p, projectID); err != nil {
 		return nil, err
