@@ -18,7 +18,10 @@
     "check:ownership": "node scripts/check-ownership.mjs",
     "check:canvas": "node scripts/check-canvas.mjs",
     "seed:diagram": "node scripts/seed-diagram.mjs",
-    "check:editor": "node scripts/check-editor.mjs"
+    "check:editor": "node scripts/check-editor.mjs",
+    "check:ingest": "node scripts/check-ingest.mjs",
+    "check:layout": "node scripts/check-layout.mjs",
+    "seed:sketch": "python3 scripts/draw-sketch.py .smoke/sketch"
   },
   "dependencies": {
     "@dagrejs/dagre": "^1.1.4",
@@ -41,7 +44,9 @@
     "react": "^18.3.1",
     "react-dom": "^18.3.1",
     "react-hook-form": "^7.54.2",
+    "react-markdown": "^9.1.0",
     "react-router-dom": "^7.1.1",
+    "remark-gfm": "^4.0.1",
     "tailwind-merge": "^2.6.0",
     "zod": "^3.24.1",
     "zustand": "^5.0.2"

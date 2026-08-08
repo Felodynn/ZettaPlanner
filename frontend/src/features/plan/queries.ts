@@ -314,3 +314,111 @@ export function usePatchDeviation(pid: string) {
     onSuccess: invalidate,
   })
 }
+
+// ── creating and removing plan objects ───────────────────────────────────────
+//
+// Manager-owned in full (§4.2). The forms that call these are gated on the
+// ownership table like every other write, and the backend checks again.
+
+export function useCreateMilestone(pid: string) {
+  const invalidate = usePlanInvalidation(pid)
+  return useMutation({
+    mutationFn: (body: components['schemas']['Create-milestoneRequest']) =>
+      unwrap(client.POST('/api/v1/projects/{pid}/milestones', { params: { path: { pid } }, body })),
+    onSuccess: invalidate,
+  })
+}
+
+export function useCreateWorkItem(pid: string) {
+  const invalidate = usePlanInvalidation(pid)
+  return useMutation({
+    mutationFn: (body: components['schemas']['Create-work-itemRequest']) =>
+      unwrap(client.POST('/api/v1/projects/{pid}/work-items', { params: { path: { pid } }, body })),
+    onSuccess: invalidate,
+  })
+}
+
+/**
+ * Deleting a work item.
+ *
+ * Soft, always (§6.5): the row keeps its `deleted_at` and its ref is never
+ * reissued, so a worklog or an audit entry mentioning ZP-14 keeps resolving.
+ * `dropped` is the *other* thing — the decision not to do something, kept
+ * because it is worth keeping — and the two are not interchangeable.
+ */
+export function useDeleteWorkItem(pid: string) {
+  const invalidate = usePlanInvalidation(pid)
+  return useMutation({
+    mutationFn: async (id: string) => {
+      const res = await client.DELETE('/api/v1/work-items/{id}', { params: { path: { id } } })
+      if (res.error) throw res.error
+    },
+    onSuccess: invalidate,
+  })
+}
+
+/** Soft as well; its work items survive, detached from any milestone. */
+export function useDeleteMilestone(pid: string) {
+  const invalidate = usePlanInvalidation(pid)
+  return useMutation({
+    mutationFn: async (id: string) => {
+      const res = await client.DELETE('/api/v1/milestones/{id}', { params: { path: { id } } })
+      if (res.error) throw res.error
+    },
+    onSuccess: invalidate,
+  })
+}
+
+/**
+ * Dependencies, set as a whole (§3.5).
+ *
+ * `blocks` cycles are rejected at write time with the path named, which is why
+ * this is a PUT of the full set rather than an add/remove pair: the check is
+ * over the graph, not over one edge.
+ */
+export function useSetDependencies(pid: string, itemId: string) {
+  const invalidate = usePlanInvalidation(pid, itemId)
+  return useMutation({
+    mutationFn: (body: components['schemas']['Set-dependenciesRequest']) =>
+      unwrap(
+        client.PUT('/api/v1/work-items/{id}/dependencies', {
+          params: { path: { id: itemId } },
+          body,
+        }),
+      ),
+    onSuccess: invalidate,
+  })
+}
+
+/**
+ * Which architecture entities this item implements.
+ *
+ * Set by a human or an agent, **never derived** from the diagram (§3.5). They
+ * exist so context assembly can pull the relevant architecture slice when the
+ * item is discussed.
+ */
+export function useSetEntityRefs(pid: string, itemId: string) {
+  const invalidate = usePlanInvalidation(pid, itemId)
+  return useMutation({
+    mutationFn: (implementsSlugs: string[]) =>
+      unwrap(
+        client.PUT('/api/v1/work-items/{id}/entity-refs', {
+          params: { path: { id: itemId } },
+          body: { implements: implementsSlugs },
+        }),
+      ),
+    onSuccess: invalidate,
+  })
+}
+
+/** The project's catalog entities, for the entity-ref picker. */
+export function useEntities(pid: string) {
+  return useQuery({
+    queryKey: ['entities', pid],
+    queryFn: async () =>
+      list(
+        (await unwrap(client.GET('/api/v1/projects/{pid}/entities', { params: { path: { pid } } })))
+          .entities,
+      ),
+  })
+}

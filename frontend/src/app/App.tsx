@@ -5,7 +5,6 @@ import { LoginPage } from '@/auth/LoginPage'
 import { SessionProvider, useMeQuery, useSession, useSessionExpiry } from '@/auth/session'
 import { ErrorBoundary } from '@/components/ErrorBoundary'
 import { Loading, EmptyState } from '@/components/ui/primitives'
-import { Placeholder } from '@/components/Placeholder'
 import { AppShell } from '@/layout/AppShell'
 import { ProjectEventsProvider } from '@/events/ProjectEvents'
 import { ProjectPicker } from '@/features/project/ProjectPicker'
@@ -17,6 +16,14 @@ import { MyTasks } from '@/features/plan/MyTasks'
 import { DiagramList } from '@/features/diagram/DiagramList'
 import { DiagramPage } from '@/features/diagram/DiagramPage'
 import { DiagramEditor } from '@/features/diagram/DiagramEditor'
+import { IngestList } from '@/features/ingest/IngestList'
+import { IngestPage } from '@/features/ingest/IngestPage'
+import { NotesPage } from '@/features/notes/NotesPage'
+import { ProposalsPage } from '@/features/proposals/ProposalsPage'
+import { ProposalDetail } from '@/features/proposals/ProposalDetail'
+import { AuditPage } from '@/features/audit/AuditPage'
+import { SettingsPage } from '@/features/project/SettingsPage'
+import { AdminPage } from '@/features/admin/AdminPage'
 
 /**
  * Refuses a project route to a non-member.
@@ -70,6 +77,7 @@ function AuthedApp() {
     <Routes>
       <Route element={<AppShell />}>
         <Route path="/" element={<ProjectPicker />} />
+        <Route path="/admin" element={<AdminPage />} />
 
         <Route path="/p/:projectId" element={<ProjectRoutes />}>
           <Route index element={<ProjectOverview />} />
@@ -80,11 +88,13 @@ function AuthedApp() {
           <Route path="diagrams" element={<DiagramList />} />
           <Route path="diagrams/:diagramId" element={<DiagramPage />} />
           <Route path="diagrams/:diagramId/edit" element={<DiagramEditor />} />
-          <Route path="ingest/*" element={<Placeholder phase="F5" what="Ingest review" />} />
-          <Route path="proposals/*" element={<Placeholder phase="F6" what="Proposals" />} />
-          <Route path="notes" element={<Placeholder phase="F2" what="Notes" />} />
-          <Route path="audit" element={<Placeholder phase="F7" what="The audit view" />} />
-          <Route path="settings" element={<Placeholder phase="F7" what="Project settings" />} />
+          <Route path="ingest" element={<IngestList />} />
+          <Route path="ingest/:ingestId" element={<IngestPage />} />
+          <Route path="proposals" element={<ProposalsPage />} />
+          <Route path="proposals/:proposalId" element={<ProposalDetail />} />
+          <Route path="notes" element={<NotesPage />} />
+          <Route path="audit" element={<AuditPage />} />
+          <Route path="settings" element={<SettingsPage />} />
         </Route>
 
         <Route path="*" element={<EmptyState title="No such page" />} />

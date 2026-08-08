@@ -21,6 +21,35 @@ const DIFF_RING: Record<DiffMark, string> = {
 }
 
 /**
+ * The diff mark as a glyph, not only as a colour.
+ *
+ * The same rule the node kinds follow (F3): colour is the third signal, never
+ * the first. It matters more here than there, because the ring competes with
+ * the border colour that already carries provenance — an amber "unchecked"
+ * border beside an amber "changed" ring is two different facts wearing the
+ * same paint, and the reviewer deciding whether to approve a deletion is
+ * exactly the person who must not have to guess.
+ */
+const DIFF_GLYPH: Record<DiffMark, { mark: string; cls: string; title: string } | null> = {
+  added: {
+    mark: '+',
+    cls: 'bg-good text-white',
+    title: 'This proposal adds this element. It is not on the diagram yet.',
+  },
+  changed: {
+    mark: '~',
+    cls: 'bg-warn text-white',
+    title: 'This proposal changes this element. Select it to see which fields.',
+  },
+  removed: {
+    mark: '−',
+    cls: 'bg-danger text-white',
+    title: 'This proposal removes this element. It is still drawn — you cannot judge a deletion you cannot see.',
+  },
+  unchanged: null,
+}
+
+/**
  * One node, in whatever mode the canvas is in.
  *
  * The diff treatment is a ring rather than a fill, so an added `datastore`
@@ -77,6 +106,21 @@ export const GraphNode = memo(function GraphNode({ data, selected }: NodeProps) 
           <div className="truncate text-[10px] text-ink-faint">{spec.label.toLowerCase()}</div>
         ) : null}
       </div>
+
+      {/* The diff mark, on the opposite corner from the confidence badge so
+          the two never overlap on an extracted element somebody has proposed
+          changing. */}
+      {diff && DIFF_GLYPH[diff] ? (
+        <span
+          className={cn(
+            'zp-num absolute -top-2 -left-1.5 flex h-4 min-w-4 items-center justify-center rounded-full px-1 text-[11px] font-bold',
+            DIFF_GLYPH[diff]!.cls,
+          )}
+          title={DIFF_GLYPH[diff]!.title}
+        >
+          {DIFF_GLYPH[diff]!.mark}
+        </span>
+      ) : null}
 
       {/* Badges sit outside the body so a clip-path cannot cut them off. */}
       <div className="absolute -top-2 -right-1.5 flex items-center gap-1">

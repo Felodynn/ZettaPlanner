@@ -1,11 +1,13 @@
-import { Link, useSearchParams } from 'react-router-dom'
+import { useEffect, useMemo, useRef, useState } from 'react'
+import { Link, useNavigate, useSearchParams } from 'react-router-dom'
 import { AlertTriangle, X } from 'lucide-react'
+import { useHotkeys, type Hotkey } from '@/lib/useHotkeys'
 import type { Milestone, WorkItem, Warning } from './queries'
 import { PriorityBadge, StatusBadge } from './atoms'
 import { Badge, Select, EmptyState, Loading } from '@/components/ui/primitives'
 import { Button } from '@/components/ui/Button'
 import { WORK_ITEM_STATUS_VALUES } from '@/api/vocabulary'
-import { useMembers } from '@/features/project/queries'
+import { useMembers, useProject } from '@/features/project/queries'
 import { formatDayShort, isOverdue } from '@/lib/format'
 import { cn } from '@/lib/cn'
 
@@ -29,8 +31,73 @@ export function WorkItemTable({
   warnings: Warning[]
   loading: boolean
 }) {
+  // This project's own prefix, not a hardcoded example. Now that projects are
+  // created in the UI, "a ref like ZP-14" is wrong on every project that is
+  // not ZP — and it is the first sentence somebody reads on an empty plan.
+  const projectKey = useProject(projectId).data?.key ?? ''
   const [params, setParams] = useSearchParams()
   const members = useMembers(projectId)
+  const navigate = useNavigate()
+
+  /**
+   * Keyboard navigation (F7).
+   *
+   * `j`/`k` move, `Enter` opens, `Escape` lets go. The cursor is an index
+   * rather than DOM focus because the rows are links inside a table: moving
+   * real focus would scroll the page on every keypress and fight the browser's
+   * own tab order, and this way `Tab` still does what `Tab` does.
+   */
+  const [cursor, setCursor] = useState(-1)
+  const rowRefs = useRef<(HTMLTableRowElement | null)[]>([])
+
+  // A filter change reshuffles the list under the cursor, so it is dropped.
+  //
+  // Keyed on the serialized query, **not** on the `params` object:
+  // `useSearchParams` hands back a new URLSearchParams instance on every
+  // render, so depending on the object runs this effect after every render and
+  // resets the cursor the instant the keyboard moves it — which looks exactly
+  // like `j` being ignored.
+  const query = params.toString()
+  useEffect(() => {
+    setCursor(-1)
+  }, [query])
+
+  /**
+   * Move the cursor.
+   *
+   * Functional, because holding `j` fires faster than React re-renders and a
+   * closure over `cursor` would make every press in one frame compute the same
+   * next index — the list would move one row and stop. The scroll is an effect
+   * on the result rather than a side effect inside the updater, since an
+   * updater has to be pure and StrictMode runs it twice.
+   */
+  const move = (delta: number) => {
+    setCursor((c) => Math.min(items.length - 1, Math.max(0, c < 0 ? 0 : c + delta)))
+  }
+
+  useEffect(() => {
+    if (cursor >= 0) rowRefs.current[cursor]?.scrollIntoView({ block: 'nearest' })
+  }, [cursor])
+
+  const hotkeys = useMemo<Hotkey[]>(
+    () => [
+      { key: 'j', run: () => move(1), describe: 'Next item' },
+      { key: 'k', run: () => move(-1), describe: 'Previous item' },
+      {
+        key: 'enter',
+        run: () => {
+          const item = items[cursor]
+          if (item) navigate(`/p/${projectId}/plan/${item.id}`)
+        },
+        describe: 'Open the selected item',
+      },
+      { key: 'escape', run: () => setCursor(-1), describe: 'Clear the selection' },
+    ],
+    // `items` and `cursor` are read inside, so the bindings are rebuilt when
+    // either moves. Cheap: this is four objects.
+    [items, cursor, projectId, navigate],
+  )
+  useHotkeys(hotkeys)
 
   const assignee = params.get('assignee') ?? ''
   const status = params.get('status') ?? ''
@@ -105,6 +172,11 @@ export function WorkItemTable({
         ) : null}
 
         <div className="flex-1" />
+        <span className="hidden text-[11px] text-ink-faint md:inline">
+          <kbd className="rounded border border-line-strong px-1">J</kbd>
+          <kbd className="ml-0.5 rounded border border-line-strong px-1">K</kbd> to move,{' '}
+          <kbd className="rounded border border-line-strong px-1">Enter</kbd> to open
+        </span>
         <span className="zp-num text-xs text-ink-faint">
           {loading ? '' : `${items.length} item${items.length === 1 ? '' : 's'}`}
         </span>
@@ -118,7 +190,7 @@ export function WorkItemTable({
           body={
             filtered
               ? 'Clear a filter, or widen one.'
-              : 'A manager creates work items. Each gets a ref like ZP-14, issued once and never reissued.'
+              : `A manager creates work items. Each gets a ref like ${projectKey || 'ZP'}-1, issued once and never reissued.`
           }
         />
       ) : (
@@ -137,16 +209,23 @@ export function WorkItemTable({
               </tr>
             </thead>
             <tbody>
-              {items.map((item) => {
+              {items.map((item, i) => {
                 const itemWarnings = warningsByItem.get(item.id) ?? []
                 const overdue = isOverdue(item.due_date) && item.status !== 'done'
                 const inactive = item.status === 'done' || item.status === 'dropped'
+                const selected = i === cursor
 
                 return (
                   <tr
                     key={item.id}
+                    ref={(el) => {
+                      rowRefs.current[i] = el
+                    }}
+                    onMouseEnter={() => setCursor(-1)}
+                    aria-selected={selected}
                     className={cn(
                       'border-b border-line/60 transition-colors hover:bg-sunken',
+                      selected && 'bg-accent-soft',
                       item.deleted_at && 'opacity-50',
                     )}
                   >

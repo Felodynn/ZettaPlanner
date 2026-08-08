@@ -7,6 +7,7 @@ import {
   MiniMap,
   ReactFlow,
   ReactFlowProvider,
+  useReactFlow,
   type Edge,
   type Node,
   type NodeChange,
@@ -18,6 +19,7 @@ import { autoLayout, mergeLayout } from './layout'
 import { GraphContainer, GraphNode, type GraphNodeData } from './GraphNode'
 import { EdgeMarkers, GraphEdge, type GraphEdgeData } from './GraphEdge'
 import { KIND, canContain } from './vocabulary'
+import { useHotkeys, type Hotkey } from '@/lib/useHotkeys'
 import { cn } from '@/lib/cn'
 
 const nodeTypes = { kind: GraphNode, container: GraphContainer }
@@ -44,6 +46,7 @@ function Canvas({
   onSelect,
   onNodeMoved,
   onConnect,
+  minimap = true,
   className,
 }: CanvasProps) {
   const placements = useMemo(
@@ -167,6 +170,31 @@ function Canvas({
     [mode, onNodeMoved],
   )
 
+  /**
+   * Canvas shortcuts (F7).
+   *
+   * Deliberately only the view controls. `f` to fit, `+`/`-` to zoom, `escape`
+   * to deselect — the things somebody reaches for while reading a diagram
+   * rather than editing one, so the same bindings work in view, edit and diff
+   * mode without one of them meaning something destructive in another.
+   */
+  const flow = useReactFlow()
+  const hotkeys = useMemo<Hotkey[]>(
+    () => [
+      {
+        key: 'f',
+        run: () => void flow.fitView({ padding: 0.15, duration: 200 }),
+        describe: 'Fit the whole diagram',
+      },
+      { key: '=', run: () => flow.zoomIn({ duration: 120 }), describe: 'Zoom in' },
+      { key: '+', run: () => flow.zoomIn({ duration: 120 }) },
+      { key: '-', run: () => flow.zoomOut({ duration: 120 }), describe: 'Zoom out' },
+      { key: 'escape', run: () => onSelect?.(undefined), describe: 'Deselect' },
+    ],
+    [flow, onSelect],
+  )
+  useHotkeys(hotkeys)
+
   const handleConnect = useCallback<OnConnect>(
     (connection) => {
       if (mode !== 'edit' || !onConnect) return
@@ -204,16 +232,18 @@ function Canvas({
           showInteractive={false}
           className="!border !border-line !bg-surface [&_button]:!border-line [&_button]:!bg-surface [&_button]:!fill-ink-muted hover:[&_button]:!bg-sunken"
         />
-        <MiniMap
-          pannable
-          zoomable
-          className="!border !border-line !bg-surface"
-          maskColor="color-mix(in oklch, var(--zp-canvas) 70%, transparent)"
-          nodeColor={(n) => {
-            const data = n.data as GraphNodeData
-            return KIND[data.node.kind]?.hue ?? 'var(--zp-line-strong)'
-          }}
-        />
+        {minimap ? (
+          <MiniMap
+            pannable
+            zoomable
+            className="!border !border-line !bg-surface"
+            maskColor="color-mix(in oklch, var(--zp-canvas) 70%, transparent)"
+            nodeColor={(n) => {
+              const data = n.data as GraphNodeData
+              return KIND[data.node.kind]?.hue ?? 'var(--zp-line-strong)'
+            }}
+          />
+        ) : null}
       </ReactFlow>
     </div>
   )

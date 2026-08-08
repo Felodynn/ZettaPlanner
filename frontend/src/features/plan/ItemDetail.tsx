@@ -6,12 +6,15 @@ import {
   Boxes,
   CheckSquare,
   ClipboardList,
+  History,
   Link2,
   ListTree,
   Plus,
   ScrollText,
   Square,
 } from 'lucide-react'
+import { EditDependencies, EditEntityRefs, EditLinksButton } from './LinkEditors'
+import { SpecExportButton } from '@/features/export/SpecExport'
 import { useSession } from '@/auth/session'
 import { Badge, Card, CardHeader, CardTitle, Input, Loading, Select, Textarea } from '@/components/ui/primitives'
 import { Button } from '@/components/ui/Button'
@@ -96,6 +99,19 @@ export function ItemDetail() {
             <ProvenanceBadge provenance={d.provenance} />
             {d.milestone_name ? <Badge tone="neutral">{d.milestone_name}</Badge> : null}
           </div>
+        </div>
+
+        {/* Two clicks from here to "who changed this due date, and why": this
+            link, then the entry. F7's criterion is three, and the third is
+            getting to the item. */}
+        <div className="flex shrink-0 items-center gap-2">
+          <Link to={`/p/${projectId}/audit?subject=work_item&subject_id=${d.id}`}>
+            <Button size="sm" variant="secondary" title="Everything that has happened to this item">
+              <History className="h-3.5 w-3.5" />
+              History
+            </Button>
+          </Link>
+          <SpecExportButton scope="work-item" id={d.id} name={`${d.ref} ${d.title}`} />
         </div>
       </div>
 
@@ -283,8 +299,8 @@ export function ItemDetail() {
             </div>
           </Card>
 
-          <Dependencies projectId={projectId} detail={d} />
-          <EntityRefs detail={d} />
+          <Dependencies projectId={projectId} detail={d} perm={f('*')} />
+          <EntityRefs projectId={projectId} detail={d} perm={f('*')} />
         </aside>
       </div>
     </div>
@@ -681,17 +697,18 @@ function Deviations({
 function Dependencies({
   projectId,
   detail,
+  perm,
 }: {
   projectId: string
   detail: NonNullable<ReturnType<typeof useWorkItem>['data']>
+  perm: ReturnType<ReturnType<typeof useOwnership>['field']>
 }) {
+  const [editing, setEditing] = useState(false)
   const groups = [
     { label: 'Blocked by', items: detail.blocked_by ?? [], tone: 'danger' as const },
     { label: 'Blocks', items: detail.blocks ?? [], tone: 'warn' as const },
     { label: 'Relates to', items: detail.relates ?? [], tone: 'neutral' as const },
   ].filter((g) => g.items.length > 0)
-
-  if (groups.length === 0) return null
 
   return (
     <Card>
@@ -700,7 +717,19 @@ function Dependencies({
           <Link2 className="h-3.5 w-3.5 text-ink-faint" />
           Dependencies
         </CardTitle>
+        <EditLinksButton
+          label="Edit dependencies"
+          onClick={() => setEditing(true)}
+          disabled={!perm.writable}
+          {...(perm.why ? { why: perm.why } : {})}
+        />
       </CardHeader>
+      {groups.length === 0 ? (
+        <p className="px-4 py-3 text-ink-muted">
+          Nothing links to this yet. A `blocks` link produces a warning when the dates disagree —
+          never a reschedule.
+        </p>
+      ) : null}
       <div className="px-4 py-2">
         {groups.map((g) => (
           <div key={g.label} className="py-1">
@@ -721,17 +750,29 @@ function Dependencies({
           </div>
         ))}
       </div>
+
+      {editing ? (
+        <EditDependencies
+          projectId={projectId}
+          detail={detail}
+          onClose={() => setEditing(false)}
+        />
+      ) : null}
     </Card>
   )
 }
 
 function EntityRefs({
+  projectId,
   detail,
+  perm,
 }: {
+  projectId: string
   detail: NonNullable<ReturnType<typeof useWorkItem>['data']>
+  perm: ReturnType<ReturnType<typeof useOwnership>['field']>
 }) {
+  const [editing, setEditing] = useState(false)
   const refs = detail.implements ?? []
-  if (refs.length === 0) return null
 
   return (
     <Card>
@@ -740,6 +781,12 @@ function EntityRefs({
           <Boxes className="h-3.5 w-3.5 text-ink-faint" />
           Implements
         </CardTitle>
+        <EditLinksButton
+          label="Edit what this implements"
+          onClick={() => setEditing(true)}
+          disabled={!perm.writable}
+          {...(perm.why ? { why: perm.why } : {})}
+        />
       </CardHeader>
       <div className="px-4 py-2">
         {/* Set by a human or an agent, never derived (§3.5). They exist so
@@ -753,10 +800,17 @@ function EntityRefs({
             </li>
           ))}
         </ul>
+        {refs.length === 0 ? (
+          <p className="text-ink-muted">Nothing yet.</p>
+        ) : null}
         <p className="mt-2 text-[11px] text-ink-faint">
           Soft references to architecture entities. Never derived from the diagram.
         </p>
       </div>
+
+      {editing ? (
+        <EditEntityRefs projectId={projectId} detail={detail} onClose={() => setEditing(false)} />
+      ) : null}
     </Card>
   )
 }

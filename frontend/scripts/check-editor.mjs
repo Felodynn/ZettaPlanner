@@ -92,9 +92,32 @@ page.on('request', (req) => {
   void req.continue()
 })
 
-await page.goto(`${BASE}/p/${PROJECT}/diagrams/${DIAGRAM}/edit`, { waitUntil: 'networkidle2' })
+// Entered through the viewer's Edit button, not by loading /edit directly.
+//
+// That distinction found a real bug: arriving from the viewer means the
+// diagram is already in the query cache, so the editor's seed effect runs on
+// the very first render — and React's remount then cleared the working copy
+// without re-seeding it. Loading /edit cold hid it entirely, because the data
+// arrives after mount. The path a person actually takes is the one to check.
+await page.goto(`${BASE}/p/${PROJECT}/diagrams/${DIAGRAM}`, { waitUntil: 'networkidle2' })
+await page.waitForSelector('.react-flow__node', { timeout: 20_000 })
+await wait(1200)
+const viewerNodes = await page.evaluate(() => document.querySelectorAll('[data-kind]').length)
+
+await page.evaluate(() => {
+  const link = [...document.querySelectorAll('a')].find((a) => /\/edit$/.test(a.getAttribute('href') ?? ''))
+  link?.click()
+})
+await page.waitForFunction(() => location.pathname.endsWith('/edit'), { timeout: 10_000 })
 await page.waitForSelector('.react-flow__node', { timeout: 20_000 })
 await wait(1500)
+
+const editorNodes = await page.evaluate(() => document.querySelectorAll('[data-kind]').length)
+if (editorNodes === 0) {
+  problems.push('the editor opened empty when entered from the viewer')
+} else if (editorNodes !== viewerNodes) {
+  problems.push(`the editor shows ${editorNodes} nodes; the viewer showed ${viewerNodes}`)
+}
 
 // 1. The lease was taken before anything was touched.
 const leaseOnEntry = sent.lease.some((l) => l.startsWith('POST') && l.includes('/lease'))
@@ -260,6 +283,7 @@ writeFileSync(
   ),
 )
 
+console.log(`entered from view:  ${viewerNodes} nodes → editor ${editorNodes}`)
 console.log(`lease calls:        ${sent.lease.join(', ') || 'none'}`)
 console.log(`revision payloads:  ${sent.revisions.length}`)
 console.log(`layout payloads:    ${sent.layout.length} (node moved: ${nodeMoved})`)

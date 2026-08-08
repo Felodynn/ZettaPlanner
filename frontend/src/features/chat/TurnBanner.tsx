@@ -1,4 +1,4 @@
-import { CircleSlash, Clock, Loader2, TriangleAlert } from 'lucide-react'
+import { CircleSlash, Clock, Info, Loader2, TriangleAlert } from 'lucide-react'
 import type { Turn } from './queries'
 import { useCancelTurn } from './queries'
 import { Button } from '@/components/ui/Button'
@@ -17,14 +17,35 @@ import { cn } from '@/lib/cn'
 /** Why a turn ended, in words rather than an enum. */
 const FINISH_MEANING: Record<string, string> = {
   finished: 'The agent finished.',
+  // Deliberately *not* a diagnosis. The backend classifies a turn that wrote
+  // nothing, proposed nothing and handed back nothing as `no_output` (§5.3),
+  // and that rule does not distinguish "the agent hit a wall" from "you asked a
+  // question, and the answer to a question is prose". Only the person reading
+  // the thread can tell those apart, so this says what happened and hands them
+  // the distinction rather than guessing at a cause.
   no_output:
-    'The turn produced no write, no proposal and no handoff. That is a non-success, not an answer — it usually means the agent hit a wall it could not name.',
+    'Nothing was written, proposed or handed back, so this turn changed nothing. If you asked a question, the answer above is the answer and this line is bookkeeping. If you asked for a change, it did not happen — say what you want changed, in as many words.',
   max_turns: 'The turn hit its step ceiling.',
   max_tokens: 'The turn hit its token ceiling.',
   max_wall_clock: 'The turn hit its time ceiling.',
   error: 'The turn failed.',
   cancelled: 'Somebody stopped this turn.',
   abandoned: 'The process running this turn did not survive. Nothing it had not already written was applied.',
+}
+
+/**
+ * How loudly to say it.
+ *
+ * `no_output` arrives with status `failed`, because the backend has one
+ * non-success status and this is one. But a turn that answered a question and
+ * wrote nothing is not the same event as a model failure or a dead process, and
+ * painting them the same red teaches people that red on this screen means
+ * nothing. Reserve the alarm for the turns that actually broke.
+ */
+function severityOf(status: string, reason: string): 'bad' | 'notice' | 'quiet' {
+  if (reason === 'cancelled' || status === 'cancelled') return 'quiet'
+  if (reason === 'no_output') return 'notice'
+  return status === 'failed' || status === 'abandoned' ? 'bad' : 'quiet'
 }
 
 export function TurnBanner({ turn, isMine }: { turn: Turn; isMine: boolean }) {
@@ -98,31 +119,49 @@ export function TurnBanner({ turn, isMine }: { turn: Turn; isMine: boolean }) {
   // A finished turn is only worth a line when it did not simply work.
   if (turn.status === 'complete' && turn.finish_reason === 'finished') return null
 
-  const bad = turn.status === 'failed' || turn.status === 'abandoned'
   const reason = turn.finish_reason ?? turn.status
+  const severity = severityOf(turn.status, reason)
+  const bad = severity === 'bad'
+  const notice = severity === 'notice'
 
   return (
     <div
       className={cn(
         'flex items-start gap-2.5 border-t px-4 py-2',
-        bad ? 'border-danger/30 bg-danger-soft' : 'border-line bg-sunken',
+        bad
+          ? 'border-danger/30 bg-danger-soft'
+          : notice
+            ? 'border-warn/30 bg-warn-soft'
+            : 'border-line bg-sunken',
       )}
     >
-      <TriangleAlert
-        className={cn('mt-0.5 h-4 w-4 shrink-0', bad ? 'text-danger' : 'text-ink-muted')}
-      />
+      {notice ? (
+        <Info className="mt-0.5 h-4 w-4 shrink-0 text-warn" />
+      ) : (
+        <TriangleAlert
+          className={cn('mt-0.5 h-4 w-4 shrink-0', bad ? 'text-danger' : 'text-ink-muted')}
+        />
+      )}
       <span className="min-w-0 flex-1">
-        <span className={cn('font-medium', bad ? 'text-danger-ink' : 'text-ink')}>
-          {humanise(reason)}
+        <span
+          className={cn(
+            'font-medium',
+            bad ? 'text-danger-ink' : notice ? 'text-warn-ink' : 'text-ink',
+          )}
+        >
+          {/* The backend's own word for it. `no_output` reads as jargon, and
+              this is the one place it is worth saying in English — the
+              vocabulary itself is not the frontend's to change. */}
+          {reason === 'no_output' ? 'Nothing was changed' : humanise(reason)}
         </span>
         <span className="text-ink-muted"> — {FINISH_MEANING[reason] ?? ''}</span>
         {turn.error_detail ? (
           <span className="mt-0.5 block wrap-break-word text-ink-muted">{turn.error_detail}</span>
         ) : null}
         <span className="zp-num mt-0.5 block text-[11px] text-ink-faint">
-          {turn.steps} steps · {formatTokens(turn.tokens_in)} in · {formatTokens(turn.tokens_out)}{' '}
-          out · {formatDuration(turn.wall_ms)}
-          {turn.retries > 0 ? ` · ${turn.retries} retry` : ''}
+          {turn.steps} step{turn.steps === 1 ? '' : 's'} · {formatTokens(turn.tokens_in)} in ·{' '}
+          {formatTokens(turn.tokens_out)} out · {formatDuration(turn.wall_ms)}
+          {turn.retries > 0 ? ` · ${turn.retries} ${turn.retries === 1 ? 'retry' : 'retries'}` : ''}
         </span>
       </span>
     </div>

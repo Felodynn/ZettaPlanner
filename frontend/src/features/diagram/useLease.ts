@@ -73,9 +73,12 @@ export function useLease(diagramId: string, enabled: boolean) {
   // Only a lease this tab actually took is worth releasing. Releasing one we
   // never held answers 404, which is noise rather than information.
   const held = useRef(false)
+  /** The acquire request in flight, shared so a re-run does not issue another. */
+  const inFlight = useRef<Promise<Lease> | null>(null)
 
   const release = useCallback(async () => {
     clearTimers()
+    inFlight.current = null
     if (!held.current) return
     held.current = false
     try {
@@ -123,14 +126,37 @@ export function useLease(diagramId: string, enabled: boolean) {
     const acquire = async () => {
       setState({ status: 'acquiring' })
       try {
-        const lease = await unwrap(
-          client.POST('/api/v1/diagrams/{id}/lease', { params: { path: { id: diagramId } } }),
-        )
-        if (cancelled) return
+        // One acquire per diagram, ever — a second effect pass awaits the
+        // first request rather than issuing its own.
+        //
+        // React runs this effect, tears it down and runs it again. Two POSTs
+        // meant the second one asked for a lease the first had already taken,
+        // came back 409, and left the editor showing "somebody else is
+        // editing" about itself — with saving blocked on a diagram this tab
+        // owned.
+        if (!inFlight.current) {
+          inFlight.current = unwrap(
+            client.POST('/api/v1/diagrams/{id}/lease', { params: { path: { id: diagramId } } }),
+          )
+        }
+        const lease = await inFlight.current
+
+        // Marked held *before* the cancellation check, because the server has
+        // one now whatever this closure has decided. Setting it afterwards
+        // meant an acquire resolving after teardown left a real lease nobody
+        // knew to release — `release()` only acts on one it believes it took —
+        // so the diagram stayed locked for its whole TTL every time somebody
+        // opened the editor and left. On a shared project that is somebody
+        // else's afternoon.
         held.current = true
+        if (cancelled) return
+
         setState({ status: 'held', lease })
         startBeating(lease.heartbeat_seconds)
       } catch (e) {
+        // Do not keep a rejected promise: a later attempt must ask again
+        // rather than await the failure that already happened.
+        inFlight.current = null
         if (cancelled) return
         if (e instanceof ApiError) {
           // A diagram's semantic layer is manager-owned in full (§4.2), so a

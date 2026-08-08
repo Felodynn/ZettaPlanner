@@ -9,7 +9,7 @@ export function ProjectOverview() {
   const { projectId = '' } = useParams()
   const project = useProject(projectId)
   const members = useMembers(projectId)
-  const { roleOn } = useSession()
+  const { roleOn, user } = useSession()
 
   if (project.isPending) return <Loading what="this project" />
   if (project.error) throw project.error
@@ -33,7 +33,10 @@ export function ProjectOverview() {
             <p className="mt-1 text-ink-faint">No description.</p>
           )}
         </div>
-        <RoleBadge role={roleOn(projectId) ?? 'developer'} />
+        {/* The account-wide role when there is no per-project override — not
+            a hardcoded guess. Claiming "developer" for an administrator is a
+            lie the rest of the screen immediately contradicts. */}
+        <RoleBadge role={roleOn(projectId) ?? user.role} />
       </div>
 
       <div className="mt-6 grid gap-4 md:grid-cols-2">

@@ -37,6 +37,15 @@ export interface PendingMove {
 }
 
 interface EditorState {
+  /**
+   * Which diagram the working copy holds, or null when it holds none.
+   *
+   * The seed guard, and it lives here rather than in a component ref for one
+   * reason: React remounts an effect without remounting the component, so a
+   * ref survives the cleanup that empties this store. The guard has to be the
+   * same thing the cleanup clears, or "already seeded" outlives the seed.
+   */
+  diagramId: string | null
   /** Null until edit mode is entered. */
   base: SemanticGraph | null
   baseRevision: number
@@ -51,7 +60,7 @@ interface EditorState {
   /** True once anything has been dragged, so the manual-mode notice fires once. */
   flippedToManual: boolean
 
-  begin: (graph: SemanticGraph, revision: number) => void
+  begin: (graph: SemanticGraph, revision: number, diagramId: string) => void
   discard: () => void
   /** Adopts a newly-saved server state as the new base, clearing history. */
   rebase: (graph: SemanticGraph, revision: number) => void
@@ -69,7 +78,25 @@ interface EditorState {
   deleteEdge: (id: string) => void
 
   moveNode: (nodeId: string, x: number, y: number) => void
-  clearPendingLayout: () => void
+  /**
+   * Pins nodes at where they currently are, without treating it as a move.
+   *
+   * Used once, when a person first drags anything: everything else is written
+   * down exactly as it looks so that nothing recomputes afterwards.
+   */
+  freezeLayout: (positions: Record<string, PendingMove>) => void
+  /** Forgets the moves that have been written. Omit to forget all of them. */
+  clearPendingLayout: (nodeIds?: string[]) => void
+  /**
+   * Adopts written coordinates as the working copy's own.
+   *
+   * The nodes here are the session's copies, seeded when the editor opened, so
+   * their `layout` is whatever the server said then. Without this, letting go
+   * of a pending move loses the only record of the drag and the box springs
+   * back to where it was an hour ago. Layout is not semantic — this does not
+   * touch undo history and cannot make the editor look dirty.
+   */
+  commitLayout: (placements: { node_id: string; x: number; y: number }[]) => void
 
   undo: () => void
   redo: () => void
@@ -107,6 +134,7 @@ export const useEditor = create<EditorState>((set, get) => {
   return {
     base: null,
     baseRevision: 0,
+    diagramId: null,
     nodes: [],
     edges: [],
     past: [],
@@ -114,8 +142,9 @@ export const useEditor = create<EditorState>((set, get) => {
     pendingLayout: {},
     flippedToManual: false,
 
-    begin: (graph, revision) =>
+    begin: (graph, revision, diagramId) =>
       set({
+        diagramId,
         base: graph,
         baseRevision: revision,
         nodes: graph.nodes.map((n) => ({ ...n })),
@@ -128,6 +157,7 @@ export const useEditor = create<EditorState>((set, get) => {
 
     discard: () =>
       set({
+        diagramId: null,
         base: null,
         baseRevision: 0,
         nodes: [],
@@ -246,7 +276,42 @@ export const useEditor = create<EditorState>((set, get) => {
         flippedToManual: true,
       })),
 
-    clearPendingLayout: () => set({ pendingLayout: {} }),
+    // Existing pending moves win: this only fills in the nodes nobody has
+    // touched, so it can never undo a drag that is already in flight.
+    freezeLayout: (positions) =>
+      set((s) => ({
+        pendingLayout: { ...positions, ...s.pendingLayout },
+        flippedToManual: true,
+      })),
+
+    commitLayout: (placements) =>
+      set((s) => {
+        const byId = new Map(placements.map((p) => [p.node_id, p]))
+        return {
+          nodes: s.nodes.map((n) => {
+            const p = byId.get(n.id)
+            if (!p) return n
+            return {
+              ...n,
+              layout: {
+                ...(n.layout ?? { collapsed: false, unplaced: false }),
+                x: p.x,
+                y: p.y,
+                // Written by a person, so no longer a fallback.
+                unplaced: false,
+              },
+            }
+          }),
+        }
+      }),
+
+    clearPendingLayout: (nodeIds) =>
+      set((s) => {
+        if (!nodeIds) return { pendingLayout: {} }
+        const rest = { ...s.pendingLayout }
+        for (const id of nodeIds) delete rest[id]
+        return { pendingLayout: rest }
+      }),
 
     undo: () =>
       set((s) => {

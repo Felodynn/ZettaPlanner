@@ -1,6 +1,8 @@
 import { useState } from 'react'
-import { Link, useParams } from 'react-router-dom'
-import { ArrowLeft, Code2, Info, Lock, Network, Pencil } from 'lucide-react'
+import { Link, useNavigate, useParams } from 'react-router-dom'
+import { ArrowLeft, Code2, Info, Lock, Network, Pencil, ScanEye } from 'lucide-react'
+import { useReevaluate } from '@/features/proposals/queries'
+import { notifyInfo, notifySuccess } from '@/components/notify'
 import { GraphCanvas } from './GraphCanvas'
 import { NodePanel } from './NodePanel'
 import { Legend } from './Legend'
@@ -14,7 +16,9 @@ import { cn } from '@/lib/cn'
 
 export function DiagramPage() {
   const { projectId = '', diagramId = '' } = useParams()
+  const navigate = useNavigate()
   const diagram = useDiagram(diagramId)
+  const reevaluate = useReevaluate(projectId)
   const [selected, setSelected] = useState<string | undefined>()
   const [view, setView] = useState<'canvas' | 'yaml'>('canvas')
   const [legendOpen, setLegendOpen] = useState(false)
@@ -72,6 +76,41 @@ export function DiagramPage() {
         >
           <Info className="h-3.5 w-3.5" />
           Legend
+        </Button>
+
+        {/* §5.4: re-evaluate returns a **Proposal, never a write**, and the
+            label has to say so before the click rather than after it. A stray
+            click must not silently rewrite a diagram somebody corrected by
+            hand, and a button called "Re-evaluate" invites exactly that
+            assumption. */}
+        <Button
+          size="sm"
+          variant="ghost"
+          loading={reevaluate.isPending}
+          onClick={() =>
+            reevaluate.mutate(diagramId, {
+              onSuccess: (result) => {
+                if (!result.proposal) {
+                  // "Nothing to change" is a real answer, and worth saying
+                  // plainly rather than leaving the screen silent.
+                  notifyInfo(
+                    `${result.message}${result.skipped ? ` ${result.skipped}` : ''}`,
+                    'Nothing proposed',
+                  )
+                  return
+                }
+                notifySuccess(
+                  `${result.message} Nothing has changed — this is a proposal waiting for a decision.`,
+                  'Proposal raised',
+                )
+                navigate(`/p/${projectId}/proposals/${result.proposal.id}`)
+              },
+            })
+          }
+          title="Ask the vision model to review this diagram against the pages it came from. The outcome is a proposal you review — never a change."
+        >
+          {reevaluate.isPending ? null : <ScanEye className="h-3.5 w-3.5" />}
+          Ask for a review
         </Button>
 
         {editPerm.writable ? (

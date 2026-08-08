@@ -8,19 +8,22 @@ import {
   Redo2,
   Save,
   Undo2,
+  Wand2,
   X,
 } from 'lucide-react'
 import { GraphCanvas } from './GraphCanvas'
 import { Palette } from './Palette'
 import { EditorPanel } from './EditorPanel'
 import { RelationPicker } from './RelationPicker'
-import { useDiagram, diagramKeys } from './queries'
+import { useDiagram, useResetLayout, diagramKeys } from './queries'
 import { useEditor, toSavePayload } from './editorStore'
+import { mergeLayout } from './layout'
 import { useLease } from './useLease'
 import type { SemanticGraph } from './model'
 import { client, list, unwrap } from '@/api/client'
 import { ApiError } from '@/api/errors'
 import { Badge, Loading } from '@/components/ui/primitives'
+import { Dialog } from '@/components/ui/Dialog'
 import { Button } from '@/components/ui/Button'
 import { notifyError, notifyInfo, notifySuccess, notifyWarn } from '@/components/notify'
 import { cn } from '@/lib/cn'
@@ -31,7 +34,9 @@ export function DiagramEditor() {
   const navigate = useNavigate()
   const qc = useQueryClient()
 
-  const diagram = useDiagram(diagramId)
+  // Always from the server: the working copy must match what the lease was
+  // taken against, not what the viewer happened to have cached.
+  const diagram = useDiagram(diagramId, true)
   const lease = useLease(diagramId, Boolean(diagramId))
 
   // Selected individually, never as `useEditor()`. Subscribing to the whole
@@ -60,19 +65,37 @@ export function DiagramEditor() {
   const [pendingEdge, setPendingEdge] = useState<{ from: string; to: string } | null>(null)
   const [conflict, setConflict] = useState<ApiError | null>(null)
   const [saving, setSaving] = useState(false)
+  const [resetting, setResetting] = useState(false)
+  const resetLayout = useResetLayout(diagramId)
   const noticedManual = useRef(false)
-  const started = useRef(false)
 
-  // Seed the working copy once, from the state the lease was taken against.
+  /**
+   * Seed the working copy from the state the lease was taken against.
+   *
+   * Guarded on the store's own `diagramId`, not on a ref. React runs an
+   * effect, cleans it up and runs it again without remounting the component,
+   * so a ref set on the first pass survives the cleanup that emptied the store
+   * — and the second pass then skips the seed it needed to redo. The editor
+   * opened blank whenever the diagram was already in the cache, which is
+   * exactly the case where you arrive from the viewer's Edit button.
+   *
+   * Reading the store rather than subscribing to it: this decides whether to
+   * write, and subscribing would re-run it on every keystroke of the editing
+   * it starts.
+   */
   useEffect(() => {
-    if (started.current || !diagram.data) return
-    started.current = true
+    const d = diagram.data
+    if (!d) return
+    if (useEditor.getState().diagramId === d.id) return
     begin(
-      { nodes: list(diagram.data.nodes), edges: list(diagram.data.edges), notes: list(diagram.data.notes) },
-      diagram.data.revision,
+      { nodes: list(d.nodes), edges: list(d.edges), notes: list(d.notes) },
+      d.revision,
+      d.id,
     )
   }, [diagram.data, begin])
 
+  // Leaving the editor drops the working copy. Undo/redo is local and does not
+  // survive it (F4) — server history is revisions.
   useEffect(() => () => discard(), [discard])
 
   // Keyboard: undo/redo, and save.
@@ -114,7 +137,17 @@ export function DiagramEditor() {
       graph.nodes.filter((n) => n.layout).map((n) => [n.id, n.layout!]),
     )
     for (const [nodeId, move] of Object.entries(pendingLayout)) {
-      base[nodeId] = { ...(base[nodeId] ?? { collapsed: false, unplaced: false }), ...move }
+      // `unplaced: false`, always. A pending move *is* the human move the flag
+      // is waiting for, and spreading it over a stored row that still said
+      // `unplaced: true` kept the flag set — so the renderer read the drag as
+      // a backend fallback, discarded it, and put the box back where
+      // auto-layout wanted it. Every node the backend creates starts flagged,
+      // so on a freshly assembled diagram that was nearly every drag.
+      base[nodeId] = {
+        ...(base[nodeId] ?? { collapsed: false }),
+        ...move,
+        unplaced: false,
+      }
     }
     return base
   }, [graph.nodes, pendingLayout])
@@ -140,7 +173,21 @@ export function DiagramEditor() {
         params: { path: { id: diagramId } },
         body: { nodes: placements },
       })
-      useEditor.getState().clearPendingLayout()
+
+      // Adopt the written positions before letting go of the pending ones.
+      //
+      // The working copy's nodes were seeded when the editor opened and carry
+      // the layout the server had *then*. Clearing a pending move without
+      // committing it left nothing holding the new coordinate, so the box
+      // sprang back to where it started — a drag that visibly undoes itself a
+      // second after you let go.
+      useEditor.getState().commitLayout(placements)
+
+      // Only what was actually sent. Anything dragged while this was in
+      // flight is still pending and must survive to the next flush.
+      useEditor.getState().clearPendingLayout(placements.map((p) => p.node_id))
+
+      // For the other screens; this one is already correct.
       void qc.invalidateQueries({ queryKey: diagramKeys.detail(diagramId) })
     } catch (e) {
       notifyError(e)
@@ -149,9 +196,36 @@ export function DiagramEditor() {
 
   const onNodeMoved = useCallback(
     (slug: string, x: number, y: number) => {
-      const node = useEditor.getState().nodes.find((n) => n.slug === slug)
+      const state = useEditor.getState()
+      const node = state.nodes.find((n) => n.slug === slug)
       if (!node) return
-      useEditor.getState().moveNode(node.id, x, y)
+
+      /**
+       * The first drag pins everything else where it already is.
+       *
+       * Otherwise a "manual" diagram is a hybrid: the boxes somebody dragged
+       * have real coordinates and the rest are still computed, so adding a
+       * node or renaming one re-runs the layout and quietly shuffles the boxes
+       * nobody touched. Freezing on the first move makes manual mean manual —
+       * from then on nothing moves unless a person moves it.
+       *
+       * Positions come from the same pure function the canvas renders with, so
+       * what gets written down is exactly what is on screen.
+       */
+      if (!state.flippedToManual) {
+        const current = mergeLayout(graph, storedLayout)
+        const frozen: Record<string, { x: number; y: number }> = {}
+        for (const n of state.nodes) {
+          if (n.slug === slug) continue
+          const at = current[n.slug]
+          // Children are positioned relative to their container, and the
+          // layout endpoint stores exactly that, so both are written as-is.
+          if (at) frozen[n.id] = { x: at.x, y: at.y }
+        }
+        state.freezeLayout(frozen)
+      }
+
+      state.moveNode(node.id, x, y)
 
       // The first drag flips the diagram to manual, permanently. Said once,
       // plainly, because auto-layout will not rearrange it again (§3.2).
@@ -166,7 +240,7 @@ export function DiagramEditor() {
       window.clearTimeout(layoutTimer.current)
       layoutTimer.current = window.setTimeout(() => void flushLayout(), 900)
     },
-    [diagram.data?.layout_mode, flushLayout],
+    [diagram.data?.layout_mode, flushLayout, graph, storedLayout],
   )
 
   const save = async () => {
@@ -245,6 +319,21 @@ export function DiagramEditor() {
 
         <div className="flex-1" />
 
+        {/* §3.2 / F4: re-running automatic layout on a manually arranged
+            diagram is destructive and behind a confirm. Offered only when
+            there is something to discard. */}
+        {(flippedToManual || d.layout_mode === 'manual') ? (
+          <Button
+            size="sm"
+            variant="ghost"
+            onClick={() => setResetting(true)}
+            title="Discard every hand-set position and go back to computed layout"
+          >
+            <Wand2 className="h-3.5 w-3.5" />
+            Re-run layout
+          </Button>
+        ) : null}
+
         <Button size="sm" variant="ghost" onClick={undo} disabled={past.length === 0}>
           <Undo2 className="h-3.5 w-3.5" />
         </Button>
@@ -313,6 +402,46 @@ export function DiagramEditor() {
           }}
           onCancel={() => setPendingEdge(null)}
         />
+      ) : null}
+
+      {resetting ? (
+        <Dialog
+          title="Discard every hand-set position?"
+          onClose={() => setResetting(false)}
+          footer={
+            <>
+              <Button variant="ghost" onClick={() => setResetting(false)}>
+                Keep the arrangement
+              </Button>
+              <Button
+                variant="danger"
+                loading={resetLayout.isPending}
+                onClick={() =>
+                  resetLayout.mutate(undefined, {
+                    onSuccess: () => {
+                      setResetting(false)
+                      notifySuccess(
+                        'Back to computed layout. The same graph will now always produce the same picture.',
+                        'Positions discarded',
+                      )
+                    },
+                  })
+                }
+              >
+                Discard and re-run
+              </Button>
+            </>
+          }
+        >
+          <p className="text-ink">
+            Every coordinate anybody has set on this diagram is removed, and layout goes back to
+            being computed on render.
+          </p>
+          <p className="mt-2 text-ink-muted">
+            Positions are not versioned — they are presentation, not semantics, so there is no
+            revision to roll back to. If somebody arranged this by hand, that arrangement is gone.
+          </p>
+        </Dialog>
       ) : null}
 
       {conflict ? (

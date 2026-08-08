@@ -11,6 +11,7 @@ import {
   ScrollText,
   Settings,
   Upload,
+  Users,
 } from 'lucide-react'
 import * as DropdownMenu from '@radix-ui/react-dropdown-menu'
 import { useQueryClient } from '@tanstack/react-query'
@@ -18,6 +19,7 @@ import { logout, useSession } from '@/auth/session'
 import { AppearanceMenu } from '@/theme/AppearanceMenu'
 import { ProjectSwitcher } from './ProjectSwitcher'
 import { RoleBadge } from './RoleBadge'
+import { Wordmark } from './Wordmark'
 import { cn } from '@/lib/cn'
 import type { Role } from '@/api/vocabulary'
 
@@ -73,6 +75,22 @@ function UserMenu() {
               <RoleBadge role={user.role} />
             </div>
           </div>
+          {/* Accounts are deployment-wide, not project-scoped, so this belongs
+              on the person rather than in the project nav. */}
+          {user.role === 'admin' ? (
+            <>
+              <DropdownMenu.Separator className="my-1.5 h-px bg-line" />
+              <DropdownMenu.Item asChild>
+                <NavLink
+                  to="/admin"
+                  className="flex cursor-pointer items-center gap-2 rounded-md px-2 py-1.5 outline-none data-[highlighted]:bg-sunken"
+                >
+                  <Users className="h-3.5 w-3.5 text-ink-faint" />
+                  Accounts
+                </NavLink>
+              </DropdownMenu.Item>
+            </>
+          ) : null}
           <DropdownMenu.Separator className="my-1.5 h-px bg-line" />
           <DropdownMenu.Item
             onSelect={() => {
@@ -99,7 +117,12 @@ export function AppShell() {
 
   return (
     <div className="flex h-full flex-col bg-canvas">
-      <header className="flex h-12 shrink-0 items-center gap-3 border-b border-line bg-surface px-3">
+      {/* `relative`, because the wordmark is centred on the *header*, not on
+          whatever space is left between the project switcher and the user
+          menu. Centring it with flex would move it every time a project name
+          changed length, which is the one thing a mark in the middle must not
+          do. */}
+      <header className="relative flex h-12 shrink-0 items-center gap-3 border-b border-line bg-surface px-3">
         <NavLink to="/" className="flex items-center gap-2" title="ZettaPlanner">
           <span className="flex h-6 w-6 items-center justify-center rounded bg-accent text-xs font-bold text-on-accent">
             Z
@@ -107,6 +130,14 @@ export function AppShell() {
         </NavLink>
         <ProjectSwitcher />
         <div className="flex-1" />
+
+        {/* Hidden on narrow screens, where the switcher and the user menu
+            genuinely need the room and a mark behind them would collide.
+            `pointer-events-none` so it never eats a click meant for either. */}
+        <div className="pointer-events-none absolute inset-x-0 flex justify-center">
+          <Wordmark className="hidden md:block" />
+        </div>
+
         <AppearanceMenu />
         <UserMenu />
       </header>

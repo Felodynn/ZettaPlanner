@@ -58,6 +58,16 @@ export interface CanvasProps {
   onNodeMoved?: (slug: string, x: number, y: number) => void
   onReparent?: (slug: string, parent: string | undefined) => void
   onConnect?: (from: string, to: string) => void
+  /**
+   * The minimap, off. Presentation only — it changes nothing about the graph.
+   *
+   * A minimap earns its corner on a full-width canvas and covers real nodes in
+   * a half-width review pane. This is a prop rather than a second renderer
+   * because §1.1 rule 1 is about the *vocabulary* having one interpretation,
+   * and a fork of GraphCanvas to hide one overlay would put that at risk to
+   * save nothing.
+   */
+  minimap?: boolean
   className?: string
 }
 

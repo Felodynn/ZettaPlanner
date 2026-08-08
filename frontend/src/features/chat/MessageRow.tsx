@@ -2,6 +2,7 @@ import { useState } from 'react'
 import { Bot, ChevronRight, Info, User, Wrench } from 'lucide-react'
 import type { Message } from './queries'
 import { Badge } from '@/components/ui/primitives'
+import { Markdown } from '@/components/Markdown'
 import { formatTime, formatTimestamp } from '@/lib/format'
 import { cn } from '@/lib/cn'
 
@@ -91,7 +92,7 @@ export function MessageRow({ message }: { message: Message }) {
       <div className="px-4 py-1.5">
         <div className="flex items-start gap-2 rounded-md border border-line bg-sunken px-2.5 py-1.5 text-ink-muted">
           <Info className="mt-0.5 h-3.5 w-3.5 shrink-0 text-ink-faint" />
-          <span className="min-w-0 flex-1 whitespace-pre-wrap">{message.content}</span>
+          <Markdown className="min-w-0 flex-1">{message.content}</Markdown>
           <span className="shrink-0 text-[11px] text-ink-faint" title={message.created_at}>
             {formatTime(message.created_at)}
           </span>
@@ -116,7 +117,11 @@ export function MessageRow({ message }: { message: Message }) {
             {formatTime(message.created_at)}
           </span>
         </div>
-        <div className="mt-0.5 wrap-break-word whitespace-pre-wrap text-ink">{message.content}</div>
+        {/* Both sides. The planner writes markdown constantly, and a person
+            pasting a stack trace in a fence or bullet-listing three options
+            means it just as much — rendering only the agent's would make the
+            thread read as two different products. */}
+        <Markdown className="mt-0.5 text-ink">{message.content}</Markdown>
       </div>
     </div>
   )
@@ -132,8 +137,12 @@ export function StreamingRow({ text, agent }: { text: string; agent: string }) {
           <span className="font-semibold text-ink">{agent}</span>
           <span className="text-[11px] text-ink-faint">writing…</span>
         </div>
-        <div className="mt-0.5 wrap-break-word whitespace-pre-wrap text-ink">
-          {text}
+        {/* The same renderer as a settled message, so the answer does not
+            visibly reflow from raw asterisks into formatting the instant it
+            finishes. A half-written fence renders as a half-written fence,
+            which is honest and stops flickering between the two. */}
+        <div className="mt-0.5">
+          <Markdown className="text-ink">{text}</Markdown>
           <span className="ml-0.5 inline-block h-3.5 w-1.5 translate-y-0.5 animate-pulse bg-accent" />
         </div>
       </div>
