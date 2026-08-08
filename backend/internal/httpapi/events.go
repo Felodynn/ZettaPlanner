@@ -216,6 +216,19 @@ func (s *Server) registerEvents(mux *http.ServeMux) {
 		w.Header().Set("X-Accel-Buffering", "no")
 		w.WriteHeader(http.StatusOK)
 
+		// One comment before anything else, so the response has a body byte
+		// immediately.
+		//
+		// X-Accel-Buffering persuades nginx; it persuades nothing else, and an
+		// intermediary that withholds headers until the first byte leaves a
+		// client showing "connecting" for as long as this stream stays quiet —
+		// up to a full keepalive interval on a project where nothing is
+		// happening. That is indistinguishable from a broken stream, which is
+		// the state §7.2 exists to make visible rather than to produce. It is
+		// a comment, so it carries no id and cannot disturb Last-Event-ID.
+		fmt.Fprint(w, ": connected\n\n")
+		flusher.Flush()
+
 		since, resuming := lastEventID(r)
 		ch, missed, replayed, cancel := s.events.subscribe(projectID, since, resuming)
 		defer cancel()

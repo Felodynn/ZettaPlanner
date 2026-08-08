@@ -38,6 +38,12 @@ function makeClient(): QueryClient {
 export function Providers({ children }: { children: ReactNode }) {
   const [queryClient] = useState(makeClient)
 
+  // Development only: lets a check seed the cache directly, which is how the
+  // transcript is tested at 500+ messages without posting 500 of them.
+  if (import.meta.env.DEV) {
+    Object.assign(window, { __zpQueryClient: queryClient })
+  }
+
   return (
     <ThemeProvider>
       <QueryClientProvider client={queryClient}>

@@ -8,8 +8,13 @@
     "build": "npm run api:generate && tsc -b && vite build",
     "preview": "vite preview",
     "typecheck": "tsc -b --noEmit",
-    "lint": "eslint .",
-    "api:generate": "node scripts/generate-api.mjs"
+    "api:generate": "node scripts/generate-api.mjs",
+    "smoke": "node scripts/smoke.mjs",
+    "check:denial": "node scripts/check-denial.mjs",
+    "check:turn": "node scripts/check-turn.mjs",
+    "check:queue": "node scripts/check-queue.mjs",
+    "check:reconnect": "ZP_RESTART=./scripts/restart-backend.sh node scripts/check-reconnect.mjs",
+    "check:longthread": "node scripts/check-longthread.mjs"
   },
   "dependencies": {
     "@dagrejs/dagre": "^1.1.4",

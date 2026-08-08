@@ -7,8 +7,10 @@ import { ErrorBoundary } from '@/components/ErrorBoundary'
 import { Loading, EmptyState } from '@/components/ui/primitives'
 import { Placeholder } from '@/components/Placeholder'
 import { AppShell } from '@/layout/AppShell'
+import { ProjectEventsProvider } from '@/events/ProjectEvents'
 import { ProjectPicker } from '@/features/project/ProjectPicker'
 import { ProjectOverview } from '@/features/project/ProjectOverview'
+import { ThreadPage } from '@/features/chat/ThreadPage'
 
 /**
  * Refuses a project route to a non-member.
@@ -34,12 +36,23 @@ function RequireMembership({ children }: { children: ReactNode }) {
   return <>{children}</>
 }
 
+/**
+ * The project subtree.
+ *
+ * The event stream is opened here, once, and every screen underneath shares it
+ * (frontend-notes §5: one connection per project, not per view). Opening it
+ * per screen would give each one its own replay window and its own idea of
+ * what it had missed.
+ */
 function ProjectRoutes() {
+  const { projectId = '' } = useParams()
   return (
     <RequireMembership>
-      <ErrorBoundary what="This project">
-        <Outlet />
-      </ErrorBoundary>
+      <ProjectEventsProvider projectId={projectId}>
+        <ErrorBoundary what="This project">
+          <Outlet />
+        </ErrorBoundary>
+      </ProjectEventsProvider>
     </RequireMembership>
   )
 }
@@ -54,7 +67,7 @@ function AuthedApp() {
 
         <Route path="/p/:projectId" element={<ProjectRoutes />}>
           <Route index element={<ProjectOverview />} />
-          <Route path="thread" element={<Placeholder phase="F1" what="The project thread" />} />
+          <Route path="thread" element={<ThreadPage />} />
           <Route path="plan/*" element={<Placeholder phase="F2" what="Plan views" />} />
           <Route path="mine" element={<Placeholder phase="F2" what="My tasks" />} />
           <Route path="diagrams/*" element={<Placeholder phase="F3" what="Diagrams" />} />
