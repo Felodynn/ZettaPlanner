@@ -16,6 +16,7 @@ import { ItemDetail } from '@/features/plan/ItemDetail'
 import { MyTasks } from '@/features/plan/MyTasks'
 import { DiagramList } from '@/features/diagram/DiagramList'
 import { DiagramPage } from '@/features/diagram/DiagramPage'
+import { DiagramEditor } from '@/features/diagram/DiagramEditor'
 
 /**
  * Refuses a project route to a non-member.
@@ -78,6 +79,7 @@ function AuthedApp() {
           <Route path="mine" element={<MyTasks />} />
           <Route path="diagrams" element={<DiagramList />} />
           <Route path="diagrams/:diagramId" element={<DiagramPage />} />
+          <Route path="diagrams/:diagramId/edit" element={<DiagramEditor />} />
           <Route path="ingest/*" element={<Placeholder phase="F5" what="Ingest review" />} />
           <Route path="proposals/*" element={<Placeholder phase="F6" what="Proposals" />} />
           <Route path="notes" element={<Placeholder phase="F2" what="Notes" />} />

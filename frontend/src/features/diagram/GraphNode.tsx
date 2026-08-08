@@ -11,7 +11,6 @@ export interface GraphNodeData extends Record<string, unknown> {
   mode: CanvasMode
   diff?: DiffMark
   unplaced?: boolean
-  selected?: boolean
 }
 
 const DIFF_RING: Record<DiffMark, string> = {
@@ -28,8 +27,8 @@ const DIFF_RING: Record<DiffMark, string> = {
  * still reads as a datastore. Recolouring the body would make diff mode a
  * fourth vocabulary that has to be learned separately (§1.1 rule 1).
  */
-export const GraphNode = memo(function GraphNode({ data }: NodeProps) {
-  const { node, mode, diff, unplaced, selected } = data as GraphNodeData
+export const GraphNode = memo(function GraphNode({ data, selected }: NodeProps) {
+  const { node, mode, diff, unplaced } = data as GraphNodeData
   const spec = KIND[node.kind]
   const unchecked = isUnchecked(node)
   const lowConfidence = isLowConfidence(node.confidence)
@@ -134,8 +133,8 @@ export const GraphNode = memo(function GraphNode({ data }: NodeProps) {
  * anywhere in the empty area selects the container rather than falling through
  * to the canvas.
  */
-export const GraphContainer = memo(function GraphContainer({ data }: NodeProps) {
-  const { node, mode, diff, selected } = data as GraphNodeData
+export const GraphContainer = memo(function GraphContainer({ data, selected }: NodeProps) {
+  const { node, mode, diff } = data as GraphNodeData
   const spec = KIND[node.kind]
   const connectable = mode === 'edit'
 

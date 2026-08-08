@@ -4,6 +4,7 @@ import { useStream } from './streamStore'
 import { str, type ConnectionState, type ProjectEvent } from './types'
 import { threadKeys } from '@/features/chat/queries'
 import { projectKeys } from '@/features/project/queries'
+import { useLeaseLost } from '@/features/diagram/useLease'
 
 /**
  * One SSE connection per project, not per view (frontend-notes §5).
@@ -149,6 +150,20 @@ export function ProjectEventsProvider({
             if (turnId) useStream.getState().clear(turnId)
           })
           invalidate(qc, projectId, e)
+          break
+        }
+
+        case 'lease.lost': {
+          const diagramId = str(e.payload, 'diagram_id')
+          if (diagramId) {
+            useLeaseLost
+              .getState()
+              .report(
+                diagramId,
+                str(e.payload, 'reason') ??
+                  'The edit session for this diagram was taken over or expired.',
+              )
+          }
           break
         }
 

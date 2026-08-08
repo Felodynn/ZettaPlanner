@@ -1,6 +1,6 @@
 import { useState } from 'react'
 import { Link, useParams } from 'react-router-dom'
-import { ArrowLeft, Code2, Info, Network } from 'lucide-react'
+import { ArrowLeft, Code2, Info, Lock, Network, Pencil } from 'lucide-react'
 import { GraphCanvas } from './GraphCanvas'
 import { NodePanel } from './NodePanel'
 import { Legend } from './Legend'
@@ -9,6 +9,7 @@ import type { SemanticGraph } from './model'
 import { Badge, Loading } from '@/components/ui/primitives'
 import { Button } from '@/components/ui/Button'
 import { list } from '@/api/client'
+import { useOwnership } from '@/features/plan/ownership'
 import { cn } from '@/lib/cn'
 
 export function DiagramPage() {
@@ -18,6 +19,9 @@ export function DiagramPage() {
   const [view, setView] = useState<'canvas' | 'yaml'>('canvas')
   const [legendOpen, setLegendOpen] = useState(false)
   const yaml = useDiagramYaml(diagramId, view === 'yaml')
+  // A diagram's semantic layer is manager-owned in full (§4.2), so a developer
+  // is not sent into an editor that will refuse them the session.
+  const editPerm = useOwnership(projectId).field('diagram', '*')
 
   if (diagram.isPending) return <Loading what="this diagram" />
   if (diagram.error) throw diagram.error
@@ -69,6 +73,20 @@ export function DiagramPage() {
           <Info className="h-3.5 w-3.5" />
           Legend
         </Button>
+
+        {editPerm.writable ? (
+          <Link to={`/p/${projectId}/diagrams/${diagramId}/edit`}>
+            <Button size="sm" variant="primary" title="Takes the edit session for this diagram">
+              <Pencil className="h-3.5 w-3.5" />
+              Edit
+            </Button>
+          </Link>
+        ) : (
+          <Button size="sm" variant="secondary" disabled title={editPerm.why}>
+            <Lock className="h-3.5 w-3.5" />
+            Edit
+          </Button>
+        )}
 
         <div className="flex rounded-md border border-line">
           <button

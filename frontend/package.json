@@ -17,7 +17,8 @@
     "check:longthread": "node scripts/check-longthread.mjs",
     "check:ownership": "node scripts/check-ownership.mjs",
     "check:canvas": "node scripts/check-canvas.mjs",
-    "seed:diagram": "node scripts/seed-diagram.mjs"
+    "seed:diagram": "node scripts/seed-diagram.mjs",
+    "check:editor": "node scripts/check-editor.mjs"
   },
   "dependencies": {
     "@dagrejs/dagre": "^1.1.4",

@@ -61,6 +61,13 @@ export const GraphEdge = memo(function GraphEdge({
       <BaseEdge
         id={id}
         path={path}
+        // React Flow lays a transparent ~20px-wide path over every edge so
+        // thin lines are easier to click. On a dense diagram those bands
+        // blanket the canvas and swallow pointer events aimed at the nodes
+        // underneath — a box simply refuses to drag, with nothing on screen
+        // to say why. Relations are edited from the side panel here, so the
+        // hit area buys nothing and costs that.
+        interactionWidth={0}
         markerEnd={spec.head === 'none' ? undefined : `url(#zp-arrow-${spec.head}-${d.relation})`}
         style={{
           stroke,

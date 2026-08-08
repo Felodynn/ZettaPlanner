@@ -1,5 +1,6 @@
-import { useCallback, useMemo } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import {
+  applyNodeChanges,
   Background,
   BackgroundVariant,
   Controls,
@@ -50,7 +51,7 @@ function Canvas({
     [graph, layout, layoutMode],
   )
 
-  const nodes = useMemo<Node[]>(() => {
+  const computedNodes = useMemo<Node[]>(() => {
     const bySlug = new Map(graph.nodes.map((n) => [n.slug, n]))
     const hasChildren = new Set(
       graph.nodes.filter((n) => n.parent && bySlug.has(n.parent)).map((n) => n.parent as string),
@@ -74,12 +75,16 @@ function Canvas({
         mode,
         ...(diff?.nodes[node.slug] ? { diff: diff.nodes[node.slug] } : {}),
         ...(layout?.[node.id]?.unplaced ? { unplaced: true } : {}),
-        selected: selected === node.slug,
       }
 
       return {
         id: node.slug,
         type: isContainer ? 'container' : 'kind',
+        // Selection is React Flow's, not ours. Rebuilding this array when the
+        // side panel's selection changes reseeds the canvas — and doing that
+        // while a pointer is down cancels the drag in progress, which is
+        // exactly when a node is selected.
+        selected: selected === node.slug,
         position: { x: place.x, y: place.y },
         width: place.w,
         height: place.h,
@@ -87,12 +92,15 @@ function Canvas({
         draggable: mode === 'edit',
         selectable: true,
         ...(parent ? { parentId: parent, extent: 'parent' as const } : {}),
-        // Containers sit behind their children.
-        ...(isContainer ? { zIndex: 0 } : { zIndex: 1 }),
+        // Stacking order, and it matters for more than looks: containers
+        // behind, then edges, then the node boxes on top. With edges above the
+        // boxes the edge SVG layer sits under the cursor and swallows the
+        // pointer, so nothing is draggable and nothing says why.
+        ...(isContainer ? { zIndex: 0 } : { zIndex: 2 }),
         style: { width: place.w, height: place.h },
       }
     })
-  }, [graph, placements, mode, diff, selected, layout])
+  }, [graph, placements, mode, diff, layout])
 
   const edges = useMemo<Edge[]>(() => {
     const slugs = new Set(graph.nodes.map((n) => n.slug))
@@ -112,17 +120,45 @@ function Canvas({
           target: edge.to,
           type: 'relation',
           data,
-          zIndex: 2,
+          zIndex: 1,
         }
       })
   }, [graph, diff])
 
+  /**
+   * React Flow's own view of the nodes.
+   *
+   * Held here rather than derived on every render, because a fully controlled
+   * `nodes` prop that ignores React Flow's position changes leaves a dragged
+   * node pinned under the cursor without moving — the drag "works" in the
+   * sense that it reports a final position, and feels completely broken.
+   *
+   * Reseeded whenever the computed placements change, which during a drag they
+   * do not: the semantic store is not touched, and the pending coordinate is
+   * recorded only when the drag ends.
+   */
+  const [rfNodes, setRfNodes] = useState<Node[]>(computedNodes)
+  const dragging = useRef(false)
+  useEffect(() => {
+    // Never mid-drag: a reseed replaces the node React Flow is moving.
+    if (!dragging.current) setRfNodes(computedNodes)
+  }, [computedNodes])
+
   const handleNodesChange = useCallback(
     (changes: NodeChange[]) => {
+      // Applied in every mode so selection and measurement work; only edit
+      // mode can produce a position change, since nothing else is draggable.
+      setRfNodes((current) => applyNodeChanges(changes, current))
+
+      for (const change of changes) {
+        if (change.type === 'position') dragging.current = change.dragging === true
+      }
+
       if (mode !== 'edit' || !onNodeMoved) return
       for (const change of changes) {
-        // Only the end of a drag is reported. Every intermediate frame would
-        // be a write, and the first one already flipped the diagram to manual.
+        // Only the end of a drag is reported upward. Every intermediate frame
+        // would be a layout write, and the first one already flipped the
+        // diagram to manual.
         if (change.type === 'position' && change.dragging === false && change.position) {
           onNodeMoved(change.id, change.position.x, change.position.y)
         }
@@ -144,7 +180,7 @@ function Canvas({
     <div className={cn('relative h-full w-full', className)}>
       <EdgeMarkers />
       <ReactFlow
-        nodes={nodes}
+        nodes={rfNodes}
         edges={edges}
         nodeTypes={nodeTypes}
         edgeTypes={edgeTypes}
