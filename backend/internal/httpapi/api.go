@@ -23,6 +23,7 @@ import (
 	"github.com/Felodynn/ZettaPlanner/backend/internal/service/auth"
 	"github.com/Felodynn/ZettaPlanner/backend/internal/service/contextsvc"
 	diagramsvc "github.com/Felodynn/ZettaPlanner/backend/internal/service/diagram"
+	"github.com/Felodynn/ZettaPlanner/backend/internal/service/governance"
 	ingestsvc "github.com/Felodynn/ZettaPlanner/backend/internal/service/ingest"
 	plansvc "github.com/Felodynn/ZettaPlanner/backend/internal/service/plan"
 	"github.com/Felodynn/ZettaPlanner/backend/internal/service/project"
@@ -140,15 +141,16 @@ func errorDetails(errs []error) []map[string]any {
 // only goal is to emit the OpenAPI document, which is why `zettaplanner
 // openapi` needs neither a database nor a model server.
 type Deps struct {
-	DB       *store.DB
-	Registry *llm.Registry
-	Auth     *auth.Service
-	Projects *project.Service
-	Diagrams *diagramsvc.Service
-	Ingests  *ingestsvc.Service
-	Plan     *plansvc.Service
-	Context  *contextsvc.Service
-	Threads  *threadsvc.Service
+	DB         *store.DB
+	Registry   *llm.Registry
+	Auth       *auth.Service
+	Projects   *project.Service
+	Diagrams   *diagramsvc.Service
+	Ingests    *ingestsvc.Service
+	Plan       *plansvc.Service
+	Context    *contextsvc.Service
+	Threads    *threadsvc.Service
+	Governance *governance.Service
 
 	// Events is the SSE fan-out. Constructed by the caller because the agent
 	// runner and the thread service publish into it and are built before the
@@ -250,6 +252,9 @@ func New(deps Deps) *Server {
 		// a request/response operation, and describing it as one in the OpenAPI
 		// document would generate a client method that hangs.
 		s.registerEvents(mux)
+	}
+	if deps.Governance != nil {
+		s.registerProposals()
 	}
 
 	// Middleware wraps the mux rather than the huma API so that it also covers

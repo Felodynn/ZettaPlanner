@@ -47,6 +47,20 @@ func (s *Service) GetMilestone(ctx context.Context, id uuid.UUID, p policy.Princ
 
 // CreateMilestone makes a milestone. Manager-owned (§4.2).
 func (s *Service) CreateMilestone(ctx context.Context, in CreateMilestoneInput, p policy.Principal) (*pl.Milestone, error) {
+	var created *pl.Milestone
+	err := s.db.InTx(ctx, func(tx pgx.Tx) error {
+		var err error
+		created, err = s.CreateMilestoneInTx(ctx, tx, in, By(p))
+		return err
+	})
+	if err != nil {
+		return nil, err
+	}
+	return created, nil
+}
+
+// CreateMilestoneInTx is CreateMilestone inside the caller's transaction.
+func (s *Service) CreateMilestoneInTx(ctx context.Context, tx pgx.Tx, in CreateMilestoneInput, w Writer) (*pl.Milestone, error) {
 	start, err := pl.ParseDate(in.StartDate)
 	if err != nil {
 		return nil, err
@@ -61,62 +75,57 @@ func (s *Service) CreateMilestone(ctx context.Context, in CreateMilestoneInput, 
 		status = pl.MilestonePlanned
 	}
 
-	var created *pl.Milestone
-	err = s.db.InTx(ctx, func(tx pgx.Tx) error {
-		subject, err := s.subject(ctx, tx, p, in.ProjectID)
-		if err != nil {
-			return err
-		}
-		if d := policy.CheckCreate(policy.KindMilestone, subject); d != nil {
-			return d
-		}
-		if _, err := s.projects.ByID(ctx, tx, in.ProjectID); err != nil {
-			return err
-		}
-
-		seq := 0
-		if in.Seq != nil {
-			seq = *in.Seq
-		} else if seq, err = s.milestones.NextSeq(ctx, tx, in.ProjectID); err != nil {
-			return err
-		}
-
-		now := time.Now()
-		m := &pl.Milestone{
-			ID:         uuid.Must(uuid.NewV7()),
-			ProjectID:  in.ProjectID,
-			Name:       strings.TrimSpace(in.Name),
-			Intent:     strings.TrimSpace(in.Intent),
-			Seq:        seq,
-			StartDate:  start,
-			DueDate:    due,
-			Status:     status,
-			Provenance: provenanceFor(p, "", true),
-			ActorID:    p.WritingActorID(),
-			CreatedAt:  now,
-			UpdatedAt:  now,
-		}
-		if err := pl.ValidateMilestone(m); err != nil {
-			return err
-		}
-		if err := s.milestones.Create(ctx, tx, m); err != nil {
-			return err
-		}
-
-		created = m
-		return audit.Write(ctx, tx, audit.Entry{
-			ProjectID:  &in.ProjectID,
-			ActorID:    p.WritingActorID(),
-			OnBehalfOf: p.OnBehalfOf(),
-			Action:     audit.ActionMilestoneCreated,
-			SubjectID:  &m.ID,
-			After:      publicMilestone(m),
-		})
-	})
+	subject, err := s.subject(ctx, tx, w, in.ProjectID)
 	if err != nil {
 		return nil, err
 	}
-	return created, nil
+	if d := policy.CheckCreate(policy.KindMilestone, subject); d != nil {
+		return nil, d
+	}
+	if _, err := s.projects.ByID(ctx, tx, in.ProjectID); err != nil {
+		return nil, err
+	}
+
+	seq := 0
+	if in.Seq != nil {
+		seq = *in.Seq
+	} else if seq, err = s.milestones.NextSeq(ctx, tx, in.ProjectID); err != nil {
+		return nil, err
+	}
+
+	now := time.Now()
+	m := &pl.Milestone{
+		ID:         uuid.Must(uuid.NewV7()),
+		ProjectID:  in.ProjectID,
+		Name:       strings.TrimSpace(in.Name),
+		Intent:     strings.TrimSpace(in.Intent),
+		Seq:        seq,
+		StartDate:  start,
+		DueDate:    due,
+		Status:     status,
+		Provenance: provenanceFor(w.Principal, "", true),
+		ActorID:    w.WritingActorID(),
+		CreatedAt:  now,
+		UpdatedAt:  now,
+	}
+	if err := pl.ValidateMilestone(m); err != nil {
+		return nil, err
+	}
+	if err := s.milestones.Create(ctx, tx, m); err != nil {
+		return nil, err
+	}
+
+	if err := audit.Write(ctx, tx, audit.Entry{
+		ProjectID:  &in.ProjectID,
+		ActorID:    w.WritingActorID(),
+		OnBehalfOf: w.OnBehalfOf(),
+		Action:     audit.ActionMilestoneCreated,
+		SubjectID:  &m.ID,
+		After:      publicMilestone(m),
+	}); err != nil {
+		return nil, err
+	}
+	return m, nil
 }
 
 // UpdateMilestoneInput is a patch.
@@ -142,85 +151,10 @@ type UpdateMilestoneInput struct {
 // UpdateMilestone patches a milestone after checking every field.
 func (s *Service) UpdateMilestone(ctx context.Context, id uuid.UUID, in UpdateMilestoneInput, p policy.Principal) (*pl.Milestone, error) {
 	var updated *pl.Milestone
-
 	err := s.db.InTx(ctx, func(tx pgx.Tx) error {
-		m, err := s.milestones.ByID(ctx, tx, id)
-		if err != nil {
-			return err
-		}
-		subject, err := s.subject(ctx, tx, p, m.ProjectID)
-		if err != nil {
-			return err
-		}
-		if d := policy.CheckWrite(policy.KindMilestone, in.Fields, subject); d != nil {
-			return d
-		}
-
-		before := publicMilestone(m)
-		beforeStatus := m.Status
-
-		if in.Name != nil {
-			m.Name = strings.TrimSpace(*in.Name)
-		}
-		if in.Intent != nil {
-			m.Intent = strings.TrimSpace(*in.Intent)
-		}
-		if in.Seq != nil {
-			m.Seq = *in.Seq
-		}
-		if in.StartDate != nil {
-			if m.StartDate, err = pl.ParseDate(*in.StartDate); err != nil {
-				return err
-			}
-		}
-		if in.DueDate != nil {
-			if m.DueDate, err = pl.ParseDate(*in.DueDate); err != nil {
-				return err
-			}
-		}
-		if in.Status != nil {
-			m.Status = pl.MilestoneStatus(strings.TrimSpace(*in.Status))
-		}
-
-		m.Provenance = provenanceFor(p, m.Provenance, false)
-		if err := pl.ValidateMilestone(m); err != nil {
-			return err
-		}
-		if err := s.milestones.Update(ctx, tx, m); err != nil {
-			return err
-		}
-
-		updated = m
-		after := publicMilestone(m)
-
-		// The status move is its own entry, not a generic update. Both are
-		// written when a patch does both: they are two facts, and the shared
-		// request_id is what puts them back together.
-		if changed(beforeStatus, m.Status) {
-			if err := audit.Write(ctx, tx, audit.Entry{
-				ProjectID:  &m.ProjectID,
-				ActorID:    p.WritingActorID(),
-				OnBehalfOf: p.OnBehalfOf(),
-				Action:     audit.ActionMilestoneStatusChanged,
-				SubjectID:  &m.ID,
-				Before:     map[string]any{"status": string(beforeStatus)},
-				After:      map[string]any{"status": string(m.Status)},
-			}); err != nil {
-				return err
-			}
-		}
-		if !changedBeyondStatus(before, after) {
-			return nil
-		}
-		return audit.Write(ctx, tx, audit.Entry{
-			ProjectID:  &m.ProjectID,
-			ActorID:    p.WritingActorID(),
-			OnBehalfOf: p.OnBehalfOf(),
-			Action:     audit.ActionMilestoneUpdated,
-			SubjectID:  &m.ID,
-			Before:     before,
-			After:      after,
-		})
+		var err error
+		updated, err = s.UpdateMilestoneInTx(ctx, tx, id, in, By(p))
+		return err
 	})
 	if err != nil {
 		return nil, err
@@ -228,42 +162,130 @@ func (s *Service) UpdateMilestone(ctx context.Context, id uuid.UUID, in UpdateMi
 	return updated, nil
 }
 
+// UpdateMilestoneInTx is UpdateMilestone inside the caller's transaction.
+func (s *Service) UpdateMilestoneInTx(ctx context.Context, tx pgx.Tx, id uuid.UUID, in UpdateMilestoneInput, w Writer) (*pl.Milestone, error) {
+	m, err := s.milestones.ByID(ctx, tx, id)
+	if err != nil {
+		return nil, err
+	}
+	subject, err := s.subject(ctx, tx, w, m.ProjectID)
+	if err != nil {
+		return nil, err
+	}
+	if d := policy.CheckWrite(policy.KindMilestone, in.Fields, subject); d != nil {
+		return nil, d
+	}
+
+	before := publicMilestone(m)
+	beforeStatus := m.Status
+
+	if in.Name != nil {
+		m.Name = strings.TrimSpace(*in.Name)
+	}
+	if in.Intent != nil {
+		m.Intent = strings.TrimSpace(*in.Intent)
+	}
+	if in.Seq != nil {
+		m.Seq = *in.Seq
+	}
+	if in.StartDate != nil {
+		if m.StartDate, err = pl.ParseDate(*in.StartDate); err != nil {
+			return nil, err
+		}
+	}
+	if in.DueDate != nil {
+		if m.DueDate, err = pl.ParseDate(*in.DueDate); err != nil {
+			return nil, err
+		}
+	}
+	if in.Status != nil {
+		m.Status = pl.MilestoneStatus(strings.TrimSpace(*in.Status))
+	}
+
+	m.Provenance = provenanceFor(w.Principal, m.Provenance, false)
+	if err := pl.ValidateMilestone(m); err != nil {
+		return nil, err
+	}
+	if err := s.milestones.Update(ctx, tx, m); err != nil {
+		return nil, err
+	}
+
+	after := publicMilestone(m)
+
+	// The status move is its own entry, not a generic update. Both are written
+	// when a patch does both: they are two facts, and the shared request_id is
+	// what puts them back together.
+	if changed(beforeStatus, m.Status) {
+		if err := audit.Write(ctx, tx, audit.Entry{
+			ProjectID:  &m.ProjectID,
+			ActorID:    w.WritingActorID(),
+			OnBehalfOf: w.OnBehalfOf(),
+			Action:     audit.ActionMilestoneStatusChanged,
+			SubjectID:  &m.ID,
+			Before:     map[string]any{"status": string(beforeStatus)},
+			After:      map[string]any{"status": string(m.Status)},
+		}); err != nil {
+			return nil, err
+		}
+	}
+	if !changedBeyondStatus(before, after) {
+		return m, nil
+	}
+	if err := audit.Write(ctx, tx, audit.Entry{
+		ProjectID:  &m.ProjectID,
+		ActorID:    w.WritingActorID(),
+		OnBehalfOf: w.OnBehalfOf(),
+		Action:     audit.ActionMilestoneUpdated,
+		SubjectID:  &m.ID,
+		Before:     before,
+		After:      after,
+	}); err != nil {
+		return nil, err
+	}
+	return m, nil
+}
+
 // DeleteMilestone soft-deletes a milestone and detaches its work items.
 func (s *Service) DeleteMilestone(ctx context.Context, id uuid.UUID, p policy.Principal) error {
 	return s.db.InTx(ctx, func(tx pgx.Tx) error {
-		m, err := s.milestones.ByID(ctx, tx, id)
-		if err != nil {
-			return err
-		}
-		subject, err := s.subject(ctx, tx, p, m.ProjectID)
-		if err != nil {
-			return err
-		}
-		if d := policy.CheckDelete(policy.KindMilestone, subject); d != nil {
-			return d
-		}
+		return s.DeleteMilestoneInTx(ctx, tx, id, By(p))
+	})
+}
 
-		// The items survive: deleting a grouping must not delete the work. They
-		// lose the pointer, because a milestone_id resolving to nothing is a
-		// filter every join downstream has to remember.
-		detached, err := s.milestones.DetachItems(ctx, tx, id)
-		if err != nil {
-			return err
-		}
-		if err := s.milestones.Delete(ctx, tx, id); err != nil {
-			return err
-		}
+// DeleteMilestoneInTx is DeleteMilestone inside the caller's transaction.
+func (s *Service) DeleteMilestoneInTx(ctx context.Context, tx pgx.Tx, id uuid.UUID, w Writer) error {
+	m, err := s.milestones.ByID(ctx, tx, id)
+	if err != nil {
+		return err
+	}
+	subject, err := s.subject(ctx, tx, w, m.ProjectID)
+	if err != nil {
+		return err
+	}
+	if d := policy.CheckDelete(policy.KindMilestone, subject); d != nil {
+		return d
+	}
 
-		before := publicMilestone(m)
-		before["work_items_detached"] = detached
-		return audit.Write(ctx, tx, audit.Entry{
-			ProjectID:  &m.ProjectID,
-			ActorID:    p.WritingActorID(),
-			OnBehalfOf: p.OnBehalfOf(),
-			Action:     audit.ActionMilestoneDeleted,
-			SubjectID:  &m.ID,
-			Before:     before,
-		})
+	// The items survive: deleting a grouping must not delete the work. They lose
+	// the pointer, because a milestone_id resolving to nothing is a filter every
+	// join downstream has to remember.
+	detached, err := s.milestones.DetachItems(ctx, tx, id)
+	if err != nil {
+		return err
+	}
+	if err := s.milestones.Delete(ctx, tx, id); err != nil {
+		return err
+	}
+
+	before := publicMilestone(m)
+	before["work_items_detached"] = detached
+	return audit.Write(ctx, tx, audit.Entry{
+		ProjectID:  &m.ProjectID,
+		ActorID:    w.WritingActorID(),
+		OnBehalfOf: w.OnBehalfOf(),
+		Action:     audit.ActionMilestoneDeleted,
+		SubjectID:  &m.ID,
+		Before:     before,
 	})
 }
 

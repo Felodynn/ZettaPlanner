@@ -20,6 +20,7 @@ import (
 	"github.com/Felodynn/ZettaPlanner/backend/internal/service/auth"
 	"github.com/Felodynn/ZettaPlanner/backend/internal/service/contextsvc"
 	diagramsvc "github.com/Felodynn/ZettaPlanner/backend/internal/service/diagram"
+	"github.com/Felodynn/ZettaPlanner/backend/internal/service/governance"
 	ingestsvc "github.com/Felodynn/ZettaPlanner/backend/internal/service/ingest"
 	plansvc "github.com/Felodynn/ZettaPlanner/backend/internal/service/plan"
 	"github.com/Felodynn/ZettaPlanner/backend/internal/service/project"
@@ -101,6 +102,7 @@ func cmdServe(ctx context.Context, args []string) error {
 		Context: contextSvc, Plan: planSvc, Diagrams: diagramSvc, Events: events,
 	})
 	threadSvc := threadsvc.New(db, log, runner, events)
+	governanceSvc := governance.New(db, log, planSvc, diagramSvc, events, registry)
 
 	// A turn left running by a killed process blocks its project's queue until
 	// the lease would lapse, and after a restart nothing is going to heartbeat
@@ -129,6 +131,7 @@ func cmdServe(ctx context.Context, args []string) error {
 		Plan:          planSvc,
 		Context:       contextSvc,
 		Threads:       threadSvc,
+		Governance:    governanceSvc,
 		Events:        events,
 		Log:           log,
 		Started:       time.Now(),

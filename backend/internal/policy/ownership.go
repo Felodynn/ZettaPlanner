@@ -258,6 +258,13 @@ func CheckWrite(kind ObjectKind, fields []string, s Subject) *Denial {
 					field, kind, strings.Join(obj.fieldNames(), ", ")),
 			}
 		}
+		// An approved proposal carries its own authority (§5.1). The field is
+		// still resolved against the table above, because a proposal naming a
+		// field that does not exist is a proposal that cannot be applied and
+		// should say so rather than be waved through.
+		if s.UnderApprovedProposal() {
+			continue
+		}
 		if d := s.allows(kind, field, rule); d != nil {
 			return d
 		}
@@ -275,7 +282,7 @@ func CheckCreate(kind ObjectKind, s Subject) *Denial {
 	if d := s.checkMembership(kind); d != nil {
 		return d
 	}
-	if s.EffectiveRole == RoleAdmin {
+	if s.EffectiveRole == RoleAdmin || s.UnderApprovedProposal() {
 		return nil
 	}
 	return s.allows(kind, "", obj.create)
@@ -304,7 +311,7 @@ func CheckDelete(kind ObjectKind, s Subject) *Denial {
 	if d := s.checkMembership(kind); d != nil {
 		return d
 	}
-	if s.EffectiveRole == RoleAdmin {
+	if s.EffectiveRole == RoleAdmin || s.UnderApprovedProposal() {
 		return nil
 	}
 	return s.allows(kind, "", *obj.del)

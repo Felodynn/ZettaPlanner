@@ -82,6 +82,15 @@ type ProposalSummary struct {
 	DecisionRationale string           `json:"decision_rationale,omitempty"`
 	CreatedAt         time.Time        `json:"created_at"`
 	Changes           []ProposalChange `json:"changes"`
+
+	// Conflicts is what this proposal's recorded premises no longer match.
+	// Computed on read for a pending proposal; empty for a decided one, whose
+	// premises are history rather than a claim about now.
+	Conflicts []ProposalConflict `json:"conflicts,omitempty"`
+	// CanApprove is whether the caller may approve this one, so the UI can say
+	// why before the click rather than after it (§5.1).
+	CanApprove             bool   `json:"can_approve,omitempty"`
+	ApprovalBlockedBecause string `json:"approval_blocked_because,omitempty"`
 }
 
 // ProposalChange is one typed edit inside a proposal.
@@ -332,54 +341,6 @@ func (s *Server) registerThreads() {
 		}
 		return &turnOutput{Body: turnSummary(t)}, nil
 	})
-
-	huma.Register(s.API, huma.Operation{
-		OperationID: "list-proposals",
-		Method:      http.MethodGet,
-		Path:        "/api/v1/projects/{pid}/proposals",
-		Summary:     "A project's proposals",
-		Description: "Phase 6 raises them; approving and applying arrives in Phase 7. A pending proposal has " +
-			"changed nothing.",
-		Tags: []string{"governance"},
-	}, func(ctx context.Context, in *struct {
-		PID    uuid.UUID `path:"pid"`
-		Status string    `query:"status" enum:"pending,approved,rejected,superseded"`
-	}) (*proposalListOutput, error) {
-		p, err := requirePrincipal(ctx)
-		if err != nil {
-			return nil, err
-		}
-		list, err := s.deps.Threads.Proposals(ctx, in.PID, pr.Status(in.Status), p)
-		if err != nil {
-			return nil, s.mapErr(ctx, err)
-		}
-		out := &proposalListOutput{}
-		out.Body.Proposals = []ProposalSummary{}
-		for _, prop := range list {
-			out.Body.Proposals = append(out.Body.Proposals, proposalSummary(prop))
-		}
-		return out, nil
-	})
-
-	huma.Register(s.API, huma.Operation{
-		OperationID: "get-proposal",
-		Method:      http.MethodGet,
-		Path:        "/api/v1/proposals/{id}",
-		Summary:     "One proposal with its ordered changes",
-		Tags:        []string{"governance"},
-	}, func(ctx context.Context, in *struct {
-		ID uuid.UUID `path:"id"`
-	}) (*proposalOutput, error) {
-		p, err := requirePrincipal(ctx)
-		if err != nil {
-			return nil, err
-		}
-		prop, err := s.deps.Threads.Proposal(ctx, in.ID, p)
-		if err != nil {
-			return nil, s.mapErr(ctx, err)
-		}
-		return &proposalOutput{Body: proposalSummary(prop)}, nil
-	})
 }
 
 // ── renderers ────────────────────────────────────────────────────────────────
@@ -425,7 +386,7 @@ func proposalSummary(p *pr.Proposal) ProposalSummary {
 		TargetKind: string(p.Target), Status: string(p.Status),
 		RaisedBy: p.RaisedByName, DecidedBy: p.DecidedByName,
 		DecisionRationale: p.DecisionRationale, CreatedAt: p.CreatedAt,
-		Changes: []ProposalChange{},
+		Changes: []ProposalChange{}, Conflicts: renderConflicts(p.Conflicts),
 	}
 	if p.OnBehalfOf != nil {
 		out.OnBehalfOf = p.OnBehalfOf.String()

@@ -34,7 +34,7 @@ func (s *Service) AddWorklog(ctx context.Context, itemID *uuid.UUID, projectID u
 			project = item.ProjectID
 		}
 
-		subject, err := s.subject(ctx, tx, p, project)
+		subject, err := s.subject(ctx, tx, By(p), project)
 		if err != nil {
 			return err
 		}

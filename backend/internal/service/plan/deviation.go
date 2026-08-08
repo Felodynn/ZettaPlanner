@@ -48,7 +48,7 @@ func (s *Service) RaiseDeviation(ctx context.Context, in CreateDeviationInput, p
 			project = item.ProjectID
 		}
 
-		subject, err := s.subject(ctx, tx, p, project)
+		subject, err := s.subject(ctx, tx, By(p), project)
 		if err != nil {
 			return err
 		}
@@ -152,7 +152,7 @@ func (s *Service) UpdateDeviation(ctx context.Context, id uuid.UUID, in UpdateDe
 		if err != nil {
 			return err
 		}
-		subject, err := s.subject(ctx, tx, p, d.ProjectID)
+		subject, err := s.subject(ctx, tx, By(p), d.ProjectID)
 		if err != nil {
 			return err
 		}
@@ -242,7 +242,7 @@ func (s *Service) DeleteDeviation(ctx context.Context, id uuid.UUID, p policy.Pr
 		if err != nil {
 			return err
 		}
-		subject, err := s.subject(ctx, tx, p, d.ProjectID)
+		subject, err := s.subject(ctx, tx, By(p), d.ProjectID)
 		if err != nil {
 			return err
 		}

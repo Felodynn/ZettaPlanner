@@ -106,6 +106,39 @@ func (n *Node) Slug() string {
 	return ""
 }
 
+// EffectiveProvenance is where this box's *content* came from, entity included.
+//
+// A node is a placement; its kind, name and summary live on the entity. So a
+// person who corrects "this is a queue, not a datastore" changes the entity and
+// leaves the placement's own provenance exactly as the extraction left it — and
+// anything asking "did a human decide this" by reading the node alone concludes
+// that nobody did. Re-evaluate (§5.4) turns entirely on that question, so the
+// stronger of the two is the truthful answer: somebody decided something about
+// this box, and a vision model that already misread it once does not get to
+// decide again.
+func (n *Node) EffectiveProvenance() Provenance {
+	if n.Entity == nil {
+		return n.Provenance
+	}
+	if humanRank(n.Entity.Provenance) > humanRank(n.Provenance) {
+		return n.Entity.Provenance
+	}
+	return n.Provenance
+}
+
+// humanRank orders provenance by how much of a decision it represents.
+func humanRank(p Provenance) int {
+	switch p {
+	case ProvHumanCreated, ProvHumanEdited:
+		return 3
+	case ProvAgentCommitted:
+		return 2
+	case ProvAgentProposed:
+		return 1
+	}
+	return 0
+}
+
 // Kind is the entity's kind.
 func (n *Node) Kind() NodeKind {
 	if n.Entity != nil {

@@ -22,6 +22,7 @@ import (
 	"github.com/Felodynn/ZettaPlanner/backend/internal/service/auth"
 	"github.com/Felodynn/ZettaPlanner/backend/internal/service/contextsvc"
 	diagramsvc "github.com/Felodynn/ZettaPlanner/backend/internal/service/diagram"
+	"github.com/Felodynn/ZettaPlanner/backend/internal/service/governance"
 	plansvc "github.com/Felodynn/ZettaPlanner/backend/internal/service/plan"
 	"github.com/Felodynn/ZettaPlanner/backend/internal/service/project"
 	threadsvc "github.com/Felodynn/ZettaPlanner/backend/internal/service/thread"
@@ -185,9 +186,20 @@ func (m *scriptedModel) registry(t *testing.T) *llm.Registry {
 				Model: "scripted", NumCtx: 8192, AssemblyBudget: 4000,
 				Caps: []config.Cap{config.CapTools}, Concurrency: 1,
 			},
+			// The same scripted server under a second name, so re-evaluate
+			// (Phase 7) resolves a vision model without a second fixture. The
+			// script queue is shared, which is exactly right: a test that runs
+			// a turn and then a re-evaluation wants both answers in the order
+			// it wrote them.
+			"vision-test": {
+				Name: "vision-test", Endpoint: m.srv.URL, Tier: config.TierSelfHosted,
+				Model: "scripted", NumCtx: 8192, AssemblyBudget: 4000,
+				Caps: []config.Cap{config.CapVision}, Concurrency: 1,
+			},
 		},
 		Roles: map[string]*config.RoleSpec{
 			"planner": {Requires: []config.Cap{config.CapTools}, Prefer: []string{"planner-test"}},
+			"vision":  {Requires: []config.Cap{config.CapVision}, Prefer: []string{"vision-test"}},
 		},
 	}
 	return llm.NewRegistry(cfg)
@@ -235,11 +247,12 @@ func newAgentFixtureWithLimits(t *testing.T, limits agent.Limits) *agentFixture 
 		Limits: limits,
 	})
 	threadSvc := threadsvc.New(db, quiet, runner, events)
+	governanceSvc := governance.New(db, quiet, planSvc, diagramSvc, events, model.registry(t))
 
 	api := httpapi.New(httpapi.Deps{
 		DB: db, Auth: auth.New(db, quiet, 0), Projects: project.New(db, quiet),
 		Diagrams: diagramSvc, Plan: planSvc, Context: contextSvc, Threads: threadSvc,
-		Events: events, Log: quiet,
+		Governance: governanceSvc, Events: events, Log: quiet,
 	})
 	srv := httptest.NewServer(api.Handler)
 	t.Cleanup(func() { api.Close(); srv.Close() })

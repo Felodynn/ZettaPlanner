@@ -80,6 +80,24 @@ func (Diagrams) Rename(ctx context.Context, q store.Querier, id uuid.UUID, name 
 	return nil
 }
 
+// Retitle changes the display name and the level together.
+//
+// The slug is untouched, here as in Rename: a rename that moved the identity
+// would look like a delete plus an add to every reference and to the git
+// projection (§6.2).
+func (Diagrams) Retitle(ctx context.Context, q store.Querier, id uuid.UUID, name, level string) error {
+	const sql = `UPDATE diagrams SET name = $2, level = $3, updated_at = now()
+	              WHERE id = $1 AND deleted_at IS NULL`
+	tag, err := q.Exec(ctx, sql, id, name, level)
+	if err != nil {
+		return err
+	}
+	if tag.RowsAffected() == 0 {
+		return missing("diagram")
+	}
+	return nil
+}
+
 // Delete soft-deletes a diagram.
 func (Diagrams) Delete(ctx context.Context, q store.Querier, id uuid.UUID) error {
 	const sql = `UPDATE diagrams SET deleted_at = now(), updated_at = now() WHERE id = $1 AND deleted_at IS NULL`

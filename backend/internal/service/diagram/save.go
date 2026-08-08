@@ -148,7 +148,7 @@ func (s *Service) Save(ctx context.Context, diagramID uuid.UUID, in SaveInput, p
 
 		// Resolve every named entity, creating what is new and raising a Note
 		// on anything that looks like a duplicate. Never merging (§3.4).
-		entities, notes, err := s.resolveEntities(ctx, tx, d, in.Nodes, p)
+		entities, notes, changedEntities, err := s.resolveEntities(ctx, tx, d, in.Nodes, p)
 		if err != nil {
 			return err
 		}
@@ -160,7 +160,7 @@ func (s *Service) Save(ctx context.Context, diagramID uuid.UUID, in SaveInput, p
 		}
 
 		nextRevision := d.CurrentRevision + 1
-		changes, err := s.applyState(ctx, tx, d, current, in, entities, p, nextRevision, false)
+		changes, err := s.applyState(ctx, tx, d, current, in, entities, changedEntities, p, nextRevision, false)
 		if err != nil {
 			return err
 		}
@@ -235,14 +235,20 @@ func validateInputVocabulary(in SaveInput) error {
 // place** (§3.4). It never merges: a merge that is wrong 10% of the time is a
 // permanent source of confusion with no permanent fix, and the human who can
 // tell the two apart is the one being asked.
-func (s *Service) resolveEntities(ctx context.Context, tx pgx.Tx, d *dg.Diagram, nodes []NodeInput, p policy.Principal) (map[string]*dg.Entity, []*dg.Note, error) {
+func (s *Service) resolveEntities(ctx context.Context, tx pgx.Tx, d *dg.Diagram, nodes []NodeInput, p policy.Principal) (map[string]*dg.Entity, []*dg.Note, map[string]bool, error) {
 	out := make(map[string]*dg.Entity, len(nodes))
+	// Which slugs had their kind, name or summary changed. Returned rather than
+	// swallowed because a correction to an entity **is** a change to the diagram
+	// showing it: without this, re-kinding a box produces no revision, no audit
+	// row and no `human_edited` on the placement — so the next re-evaluation is
+	// told nobody ever looked at it.
+	changed := map[string]bool{}
 	var raised []*dg.Note
 
 	for _, n := range nodes {
 		existing, err := s.entities.BySlug(ctx, tx, d.ProjectID, n.Slug)
 		if err != nil && !isNotFound(err) {
-			return nil, nil, err
+			return nil, nil, nil, err
 		}
 
 		if existing != nil {
@@ -254,10 +260,11 @@ func (s *Service) resolveEntities(ctx context.Context, tx pgx.Tx, d *dg.Diagram,
 				existing.Name = n.Name
 				existing.Summary = n.Summary
 				existing.Attrs = n.Attrs
-				existing.Provenance = dg.ProvHumanEdited
+				existing.Provenance = provenanceOr(n.Provenance, dg.ProvHumanEdited)
 				if err := s.entities.Update(ctx, tx, existing); err != nil {
-					return nil, nil, err
+					return nil, nil, nil, err
 				}
+				changed[n.Slug] = true
 			}
 			out[n.Slug] = existing
 			continue
@@ -270,17 +277,17 @@ func (s *Service) resolveEntities(ctx context.Context, tx pgx.Tx, d *dg.Diagram,
 			ActorID:    p.WritingActorID(), CreatedAt: time.Now(), UpdatedAt: time.Now(),
 		}
 		if err := s.entities.Create(ctx, tx, created); err != nil {
-			return nil, nil, err
+			return nil, nil, nil, err
 		}
 		out[n.Slug] = created
 
 		notes, err := s.noteCollisions(ctx, tx, created, p)
 		if err != nil {
-			return nil, nil, err
+			return nil, nil, nil, err
 		}
 		raised = append(raised, notes...)
 	}
-	return out, raised, nil
+	return out, raised, changed, nil
 }
 
 // noteCollisions records a Note for each existing entity whose name normalises
@@ -347,7 +354,8 @@ func changedEntity(e *dg.Entity, n NodeInput) bool {
 func (s *Service) applyState(
 	ctx context.Context, tx pgx.Tx,
 	d *dg.Diagram, current *dg.Graph, in SaveInput,
-	entities map[string]*dg.Entity, p policy.Principal, revision int, additive bool,
+	entities map[string]*dg.Entity, changedEntities map[string]bool,
+	p policy.Principal, revision int, additive bool,
 ) (repo.RevisionChanges, error) {
 	var changes repo.RevisionChanges
 
@@ -367,11 +375,15 @@ func (s *Service) applyState(
 		entity := entities[n.Slug]
 		if existing, ok := currentNodes[n.Slug]; ok {
 			nodeIDBySlug[n.Slug] = existing.ID
-			if existing.LabelOverride != n.LabelOverride ||
-				!reflect.DeepEqual(orEmptyMap(existing.Attrs), orEmptyMap(n.Attrs)) {
+			// The entity's own fields count. Correcting a box's kind is a change
+			// to every diagram it appears in, and recording it only on the
+			// entity leaves this diagram with no revision saying it happened.
+			placementMoved := existing.LabelOverride != n.LabelOverride ||
+				!reflect.DeepEqual(orEmptyMap(existing.Attrs), orEmptyMap(n.Attrs))
+			if placementMoved || changedEntities[n.Slug] {
 				existing.LabelOverride = n.LabelOverride
 				existing.Attrs = n.Attrs
-				existing.Provenance = dg.ProvHumanEdited
+				existing.Provenance = provenanceOr(n.Provenance, dg.ProvHumanEdited)
 				if err := s.diagrams.UpdateNode(ctx, tx, existing); err != nil {
 					return changes, err
 				}

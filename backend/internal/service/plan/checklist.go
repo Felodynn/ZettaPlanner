@@ -22,7 +22,7 @@ func (s *Service) AddChecklistItem(ctx context.Context, itemID uuid.UUID, text s
 		if err != nil {
 			return err
 		}
-		subject, err := s.forItem(ctx, tx, p, item)
+		subject, err := s.forItem(ctx, tx, By(p), item)
 		if err != nil {
 			return err
 		}
@@ -97,7 +97,7 @@ func (s *Service) UpdateChecklistItem(ctx context.Context, id uuid.UUID, in Upda
 		if err != nil {
 			return err
 		}
-		subject, err := s.forItem(ctx, tx, p, item)
+		subject, err := s.forItem(ctx, tx, By(p), item)
 		if err != nil {
 			return err
 		}
@@ -176,7 +176,7 @@ func (s *Service) DeleteChecklistItem(ctx context.Context, id uuid.UUID, p polic
 		if err != nil {
 			return err
 		}
-		subject, err := s.forItem(ctx, tx, p, item)
+		subject, err := s.forItem(ctx, tx, By(p), item)
 		if err != nil {
 			return err
 		}

@@ -141,7 +141,27 @@ type Subject struct {
 
 	// IsReporter: the principal raised the deviation being edited.
 	IsReporter bool
+
+	// ApprovedProposal is the proposal this write is applying, set only after
+	// the approval gate has run.
+	//
+	// §5.1 gives `admin` and `manager` approval authority over anything, while
+	// §4.2 makes dev-owned fields a ceiling — a manager may not patch `status`,
+	// because it is the developer's report of reality and overwriting it
+	// destroys the signal rather than correcting it. Both are true at once, and
+	// a proposal is what reconciles them: the governed route is deliberate,
+	// carries a rationale, names an approver, and leaves an audit row saying who
+	// raised it and who decided. That is a different act from a silent patch.
+	//
+	// **Only the governance service may set this**, and only after deciding who
+	// was allowed to approve. Setting it anywhere else turns the ownership table
+	// into a suggestion.
+	ApprovedProposal *uuid.UUID
 }
+
+// UnderApprovedProposal reports whether this write is applying a decided
+// proposal.
+func (s Subject) UnderApprovedProposal() bool { return s.ApprovedProposal != nil }
 
 // ── principal in context ─────────────────────────────────────────────────────
 

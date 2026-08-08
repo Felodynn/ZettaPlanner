@@ -107,7 +107,7 @@ func (s *Service) ApplyInTx(ctx context.Context, tx pgx.Tx, in ApplyInput, p pol
 		return nil, den
 	}
 
-	entities, raised, err := s.resolveEntities(ctx, tx, d, in.Nodes, p)
+	entities, raised, changedEntities, err := s.resolveEntities(ctx, tx, d, in.Nodes, p)
 	if err != nil {
 		return nil, err
 	}
@@ -120,7 +120,7 @@ func (s *Service) ApplyInTx(ctx context.Context, tx pgx.Tx, in ApplyInput, p pol
 	nextRevision := d.CurrentRevision + 1
 	changes, err := s.applyState(ctx, tx, d, current,
 		SaveInput{Summary: in.Summary, Nodes: in.Nodes, Edges: in.Edges},
-		entities, p, nextRevision, true)
+		entities, changedEntities, p, nextRevision, true)
 	if err != nil {
 		return nil, err
 	}

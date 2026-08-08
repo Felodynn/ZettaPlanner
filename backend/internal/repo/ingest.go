@@ -83,6 +83,37 @@ func (Ingests) ListByProject(ctx context.Context, q store.Querier, projectID uui
 	return out, rows.Err()
 }
 
+// ForDiagram returns the accepted ingests a diagram was built from, newest
+// first.
+//
+// This is what makes re-evaluate worth running: the pages are the evidence, and
+// showing the model the drawing again alongside what a human corrected
+// afterwards is a much sharper question than showing it the graph alone (§5.4).
+func (Ingests) ForDiagram(ctx context.Context, q store.Querier, diagramID uuid.UUID, limit int) ([]*ing.Ingest, error) {
+	if limit <= 0 || limit > 20 {
+		limit = 5
+	}
+	const sql = `SELECT ` + ingestColumns + `
+	               FROM ingests
+	              WHERE diagram_id = $1 AND status = 'accepted'
+	              ORDER BY created_at DESC LIMIT $2`
+	rows, err := q.Query(ctx, sql, diagramID, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var out []*ing.Ingest
+	for rows.Next() {
+		i, err := scanIngest(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, i)
+	}
+	return out, rows.Err()
+}
+
 // Transition moves an ingest from one state to another, refusing if it is no
 // longer in the state the caller last saw.
 //

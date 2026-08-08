@@ -77,9 +77,11 @@ internal/
   repo/                    one file per aggregate, SQL only
   policy/                  roles, field ownership, denial text
   service/                 orchestration; owns transactions
-    auth/ project/ diagram/ ingest/ plan/ contextsvc/ thread/ proposal/ export/
-                           (thread/ owns conversations, the turn queue, and the
-                            read side of governance)
+    auth/ project/ diagram/ ingest/ plan/ contextsvc/ thread/ governance/ export/
+                           (thread/ owns conversations and the turn queue;
+                            governance/ decides and applies proposals and runs
+                            re-evaluate. Every mutating method in plan/ has an
+                            `InTx` form so a proposal is one transaction)
   agent/                   loop, tools, turn lease, limits, retry, trace
   contextbuild/            skeleton, expansion, spill, digest — pure, no I/O
   vector/                  the similarity boundary (§6.4); no SQL
@@ -390,6 +392,12 @@ if you were the model.
 | D51 | **The SSE hub keeps a bounded in-memory ring per project and emits `resync` when a client's gap exceeds it** | §7.2 says `Last-Event-ID` is honoured "where it can be" and `resync` otherwise, which is a design, not a hedge. These events are notifications about facts that are already durable in Postgres; persisting a second copy would create a second thing that can disagree with the first. A restart drops the ring and every client resyncs, which is the correct answer after a restart. Two details earned their own thought: a client that sends `Last-Event-ID: 0` has seen nothing and wants everything, which is **not** the same as a client that sends no header and has missed nothing — collapsing them loses a reconnecting client's whole gap. And a subscriber whose buffer is full is dropped rather than blocked, because holding a turn's progress hostage to a wedged browser tab is not a trade anybody wants |
 | D52 | **A turn that did not succeed posts the harness's verdict into the thread alongside the model's summary** | Found by the test, then seen for real: a `no_output` turn ends with a confident summary — "I looked at the plan and everything seems fine" — and posting only that is indistinguishable from a turn that did the work. So both go in: what the model said it did, and what actually happened. The verdict names the finish reason and, for `no_output`, says plainly that nothing was written, proposed or handed back and that `zettaplanner trace` shows why |
 | D53 | **`turn_events` is append-only by trigger, and separate from `audit_log`** | The audit log is the permanent record of what changed (§6.5) and may never be pruned. The trace is diagnostic: what the *model* did, including the calls that changed nothing and the ones that failed. Mixing them would either pollute the export with retries or lose the retries entirely. Append-only for the same reason as the audit log, because "what actually happened" is not a question a rewritable table can answer — and separate so a later version can prune it by age without touching anything the retrospective reads |
+| D54 | **An approved proposal carries write authority through `policy.Subject`, not around it.** Contract §5.1 amended | §5.1 gives managers approval over anything; §4.2 makes dev-owned fields a ceiling, so a manager may not patch `status`. Both are true, and a proposal is what reconciles them — the governed route is deliberate, carries a rationale, names an approver and leaves an audit trail, which is a different act from a silent patch. The implementation could have been a bypass in the governance service; instead `Subject` gained `ApprovedProposal` and the three existing checks honour it. That keeps one enforcement path, keeps every teaching denial intact for everything else, and keeps the authority decision in one place — the approval gate — rather than scattered across the writers. The field is still resolved against the table first, so a proposal naming a field that does not exist fails rather than being waved through |
+| D55 | **The applier's settable-field list is generated from the ownership table, and the propose tools validate against the same list** | The obvious version is a hand-written list per target in the applier. It drifts silently and in the worst direction: adding a field to §4.2 makes it *proposable* immediately and leaves it unappliable, so the proposal is raised, read, agreed to, and then refused — at the one moment when somebody has already spent their attention. Deriving it from `policy.Rules` made two fields real work (`dependencies` and `entity_refs` needed their own `InTx` calls and ref/slug resolution) rather than letting them be quietly unsupported, which is the point. A test compares the generated set against what the applier actually reads, so the next field added to the table fails a test rather than a proposal |
+| D56 | **A node's provenance is the stronger of its own and its entity's.** Contract §3.7 and §5.4 amended | Found by the manual test, and it silently disabled the whole re-evaluate flow. A node is a *placement*; kind, name and summary live on the catalog entity. So a person correcting "this is a queue, not a datastore" writes `human_edited` to the entity and leaves the placement saying `vlm_extracted` — and re-evaluate, which asks "what did a human decide", read the placement and concluded nobody had. The first real run duly offered to undo the correction. Two halves to the fix: consumers take the effective value, and an entity change now counts as a change to each diagram showing it, so it produces a revision and an audit row instead of happening invisibly |
+| D57 | **A change's premise is the fields it would write, plus the target's existence — not everything its snapshot recorded.** Contract §5.1 amended | The propose tools capture a fixed snapshot — ref, title, status, priority, both dates — whatever the change is about. Comparing all of it is the contract's literal reading of "the target moved" and is safe on paper, but in a live project a developer ticking a status supersedes every pending proposal about that item, and a conflict that fires constantly is one people learn to click past. That costs more than the case it guards. The narrow rule still catches the case this exists for: a proposal that would set a due date, approved after somebody else moved that same due date, silently reverts their decision. Worth revisiting in dogfood (Q10) |
+| D58 | **Superseding commits; the conflict is returned after the transaction, not from inside it** | The first version returned the `ConflictError` from the transaction closure, which rolled back the very row recording the supersession — leaving the proposal pending and the reviewer asked the same stale question tomorrow. Found by the test that asserted the status afterwards, which is the only way this one gets found: the API response was correct and the database was not. Superseding is a **decision** and has to land like one |
+| D59 | **Re-evaluate restates its output shape in the prompt and retries once with the teaching error** | The fourth instance of D38's pattern, measured the same day: `gemma4:31b-cloud` was sent a `format` schema and answered *"The `token-store` is incorrectly typed as a `queue`; it should be a `datastore`."* — a correct observation in a shape nothing can apply. `format` is accepted and discarded for rented weights. Same fix as ingest, for the same reason: the prompt states the object, and the second attempt carries the parse failure back verbatim |
 | Q3 | **Answered: per-page wins, and not narrowly** | Same schema, same rules, same model, same three pages. Per-page: 7 nodes, 7 edges, correct kinds, both dangling arrows flagged. Whole-document, three trials: **0 nodes every time**, 7 edges every time, and an invented `unknown_destination` endpoint. The failure is not "worse cross-page linking" as assumed — the model stops emitting the first array altogether once the input is multi-image, so there is nothing for the edges to attach to. Whole-document is cheaper in input tokens (1,605 against 3,840, since the images share one prompt) and the output is unusable. Latency on the real cloud model was 7–10s per page. The one thing per-page genuinely loses is that whole-document *did* join `auth_service → token_store` across the page break; per-page could not, and correctly recorded it as unresolved rather than guessing |
 | Q6 | **Lease TTL 5 minutes, heartbeat 60 seconds** — answered, and due to be revisited in dogfood | Long enough to survive a screen lock, a network blip, or a lid closed while somebody answers the door; short enough that a browser killed mid-edit does not hold a diagram for an afternoon. A sleeping laptop loses its lease, which is the correct outcome — the alternative is a diagram nobody can touch because of a machine that is not coming back. The TTL is published in the acquire response so the frontend does not hard-code a number that later disagrees with the server |
 
@@ -792,13 +800,46 @@ POST /api/v1/proposals/{pid}/reject -d '{"rationale":"the queue is deliberate"}'
 ```
 
 **Exit criteria:**
-- [ ] Proposals apply atomically as one revision or not at all
-- [ ] Stale proposals report `superseded` with the conflict named
-- [ ] Rejection without rationale rejected; rationale reaches assembled context
-- [ ] Re-evaluate produces a proposal and receives edit provenance
-- [ ] Developer approval limited to wholly dev-owned proposals
-- [ ] Approving a proposal writes one audit entry per change plus one for the
+- [x] Proposals apply atomically as one revision or not at all
+- [x] Stale proposals report `superseded` with the conflict named
+- [x] Rejection without rationale rejected; rationale reaches assembled context
+- [x] Re-evaluate produces a proposal and receives edit provenance
+- [x] Developer approval limited to wholly dev-owned proposals
+- [x] Approving a proposal writes one audit entry per change plus one for the
       decision
+
+**Notes on what was built:**
+
+- **The application goes through the same service calls a human write does.**
+  Every mutating method in `internal/service/plan` gained an `InTx` form, so a
+  proposal touching four things is one transaction rather than four — and every
+  one of them still runs the same `CheckWrite`, writes the same audit actions,
+  and enforces the same cycle and membership rules. The alternative, a second
+  writer inside the governance service, would have been a second enforcement
+  path for §4.2, which is precisely what D7 exists to prevent.
+- **A diagram proposal needed a third entry point.** `Save` is a human at a
+  canvas and needs a lease and a base revision; `Apply` is additive evidence and
+  cannot remove anything, but "route the API through the cache" removes an
+  arrow. `ApplyEditsInTx` composes named edits onto the graph *inside the
+  transaction that read it*, so there is nothing to be stale against, and the
+  premise check answers the question a base revision would have. Its composition
+  step is pure and tested with no database at all.
+- **Mixed proposals are unreachable today.** `propose_plan_change` and
+  `propose_diagram_change` are separate tools, so no caller can produce
+  `target_kind: mixed`. The applier handles it anyway — it groups diagram edits
+  per diagram and runs plan changes in seq order — because the alternative is a
+  shape the schema permits and the code cannot apply.
+- **Re-evaluate is synchronous, and that is a trade rather than an oversight.**
+  §7.1 says the endpoint returns a Proposal; returning a job id would mean a
+  second state machine, a second progress stream and a second thing that can be
+  left half-finished. The cost is a slow request on a multi-page ingest, so it
+  is bounded at four pages and says what it skipped. Most diagrams have no
+  ingest behind them and are one call.
+- Measured on the real models: re-evaluation of a three-box diagram on
+  `gemma4:31b-cloud` produced **three correct corrections** (actor → service,
+  service → datastore, service → external_system) with a reason on each. The
+  planner then read the rejection and declined to re-propose, naming the
+  convention it had been told about — the §5.2 loop closing on a real model.
 
 ---
 
@@ -892,3 +933,4 @@ harness and got lucky*.
 | Q7 | What shape the v0.1 audit export takes — one flat CSV or several (transitions, worklogs, turns, raw events) | v0.1, from the Phase 8 rehearsal and real dogfood data. Deliberately not decided now |
 | Q8 | **Should a subtask's own assignee be able to write it?** Today they cannot: §4.2 scopes SubTask and ChecklistItem to the assignee of the *parent item* ("within own item"), so handing somebody a subtask without reassigning the item leaves them unable to tick it. Implemented as the table says rather than widened silently | Dogfood (Phase 9), alongside D25. Both are the same shape of question — a rule that reads correctly in the table and may be wrong in a real week |
 | Q9 | **Does expansion need to match slug components, not just whole slugs?** The manual test's own question — "why is auth blocked?" — resolved to nothing, because the entity is `auth-service` and "auth" is not it. The skeleton still answered it, and `--item` covers the gap, but a natural question got no expansion. Matching hyphen-separated components would fix it and would also match "store" against `token-store` | Dogfood (Phase 9), from how people actually phrase things. Over-inclusion is visible in one line of `context show`; a silent miss is not visible at all, which argues for the looser rule — but not before there is real phrasing to look at |
+| Q10 | **Is the narrow reading of "the target moved" right?** (D57) A change's premise is the fields it would write plus the target's existence, so an edit elsewhere on the same item does not supersede. The broad reading is safer on paper — a proposal whose *rationale* cited a status that has since changed is arguably stale — and noisier in practice | Dogfood (Phase 9). The measurement is how often a superseded proposal turns out to have been fine, against how often an applied one turns out to have reverted something. A middle answer exists: have the propose tools record what the change is actually about rather than a fixed snapshot |

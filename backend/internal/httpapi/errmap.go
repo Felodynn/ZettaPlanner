@@ -9,6 +9,7 @@ import (
 	"github.com/Felodynn/ZettaPlanner/backend/internal/domain/diagram"
 	"github.com/Felodynn/ZettaPlanner/backend/internal/domain/ingest"
 	"github.com/Felodynn/ZettaPlanner/backend/internal/domain/plan"
+	"github.com/Felodynn/ZettaPlanner/backend/internal/domain/proposal"
 	"github.com/Felodynn/ZettaPlanner/backend/internal/llm"
 	"github.com/Felodynn/ZettaPlanner/backend/internal/policy"
 	"github.com/Felodynn/ZettaPlanner/backend/internal/repo"
@@ -127,6 +128,30 @@ func mapError(ctx context.Context, log *slog.Logger, err error) error {
 	if errors.As(err, &cycle) {
 		return Errorf(CodeValidationFailed, "%s", cycle.Error()).
 			WithDetail("cycle", cycle.Path).
+			WithRequestID(requestID(ctx))
+	}
+
+	// A proposal whose premise has moved. Every conflict is in the details, not
+	// only the first: a reviewer deciding whether to re-raise needs to know how
+	// far the world has moved, and being told one field at a time turns that
+	// into a guessing game.
+	var conflict *proposal.ConflictError
+	if errors.As(err, &conflict) {
+		e := Errorf(CodeConflict, "%s", conflict.Error())
+		for k, v := range conflict.Details() {
+			e.WithDetail(k, v)
+		}
+		return e.WithRequestID(requestID(ctx))
+	}
+
+	// A proposal that cannot be applied against the graph as it stands. Distinct
+	// from a conflict: this is "the thing you named is not there", which usually
+	// means the proposal was written against a different diagram.
+	var unapplicable *diagramsvc.UnapplicableError
+	if errors.As(err, &unapplicable) {
+		return Errorf(CodeConflict, "This proposal names %s, which %s. Nothing was applied.",
+			unapplicable.Element, unapplicable.Reason).
+			WithDetail("element", unapplicable.Element).
 			WithRequestID(requestID(ctx))
 	}
 

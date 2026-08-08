@@ -74,6 +74,7 @@ type Service struct {
 	deviations repo.Deviations
 	warnings   repo.Warnings
 	users      repo.Users
+	entities   repo.Entities
 }
 
 // New builds the service. indexer may be nil.
@@ -84,20 +85,48 @@ func New(db *store.DB, log *slog.Logger, indexer Indexer) *Service {
 	return &Service{db: db, log: log, indexer: indexer}
 }
 
+// ── writers ──────────────────────────────────────────────────────────────────
+
+// Writer is who a write is made by, and under what authority.
+//
+// Every mutating method here has an `InTx` form taking one of these, because a
+// proposal applies several plan changes **as one revision or not at all** (§5.1)
+// and so cannot be several transactions. The public methods are thin wrappers
+// that open the transaction and pass By(p).
+type Writer struct {
+	policy.Principal
+
+	// Proposal is the approved proposal this write is applying.
+	//
+	// It reaches policy.Subject and is what lets an approved proposal change a
+	// field its approver could not have patched directly. Only the governance
+	// service sets it, and only after deciding who was allowed to approve.
+	Proposal *uuid.UUID
+}
+
+// By is an ordinary write, under no proposal.
+func By(p policy.Principal) Writer { return Writer{Principal: p} }
+
+// UnderProposal is a write applying an approved proposal.
+func UnderProposal(p policy.Principal, proposalID uuid.UUID) Writer {
+	return Writer{Principal: p, Proposal: &proposalID}
+}
+
 // ── subjects ─────────────────────────────────────────────────────────────────
 
 // subject resolves the caller's standing on a project, with no relationship to
 // any particular row. Used for creates and for project-level reads.
-func (s *Service) subject(ctx context.Context, q store.Querier, p policy.Principal, projectID uuid.UUID) (policy.Subject, error) {
-	override, err := s.members.RoleFor(ctx, q, projectID, p.UserID)
+func (s *Service) subject(ctx context.Context, q store.Querier, w Writer, projectID uuid.UUID) (policy.Subject, error) {
+	override, err := s.members.RoleFor(ctx, q, projectID, w.UserID)
 	if err != nil {
 		return policy.Subject{}, err
 	}
 	return policy.Subject{
-		Principal:     p,
-		ProjectID:     projectID,
-		EffectiveRole: policy.Effective(p.GlobalRole, override),
-		IsMember:      override != nil,
+		Principal:        w.Principal,
+		ProjectID:        projectID,
+		EffectiveRole:    policy.Effective(w.GlobalRole, override),
+		IsMember:         override != nil,
+		ApprovedProposal: w.Proposal,
 	}, nil
 }
 
@@ -107,12 +136,12 @@ func (s *Service) subject(ctx context.Context, q store.Querier, p policy.Princip
 // transaction as the write it authorises. Resolving it anywhere else — from a
 // cached copy, from the request body — would mean the check is about a
 // different item from the one being written.
-func (s *Service) forItem(ctx context.Context, q store.Querier, p policy.Principal, item *pl.WorkItem) (policy.Subject, error) {
-	sub, err := s.subject(ctx, q, p, item.ProjectID)
+func (s *Service) forItem(ctx context.Context, q store.Querier, w Writer, item *pl.WorkItem) (policy.Subject, error) {
+	sub, err := s.subject(ctx, q, w, item.ProjectID)
 	if err != nil {
 		return policy.Subject{}, err
 	}
-	sub.IsAssignee = item.AssigneeID != nil && *item.AssigneeID == p.UserID
+	sub.IsAssignee = item.AssigneeID != nil && *item.AssigneeID == w.UserID
 	return sub, nil
 }
 

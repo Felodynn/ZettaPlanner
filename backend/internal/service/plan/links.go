@@ -3,6 +3,7 @@ package plan
 import (
 	"context"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -32,67 +33,76 @@ type SetDependenciesInput struct {
 // developer's route to changing one is a proposal.
 func (s *Service) SetDependencies(ctx context.Context, itemID uuid.UUID, in SetDependenciesInput, p policy.Principal) ([]pl.Dependency, error) {
 	var out []pl.Dependency
-
 	err := s.db.InTx(ctx, func(tx pgx.Tx) error {
-		item, err := s.items.ByID(ctx, tx, itemID)
-		if err != nil {
-			return err
-		}
-		subject, err := s.forItem(ctx, tx, p, item)
-		if err != nil {
-			return err
-		}
-		if d := policy.CheckWrite(policy.KindWorkItem, []string{"dependencies"}, subject); d != nil {
-			return d
-		}
-
-		before, err := s.deps.Outgoing(ctx, tx, itemID)
-		if err != nil {
-			return err
-		}
-
-		now := time.Now()
-		for _, set := range []struct {
-			kind    pl.DependencyKind
-			targets *[]uuid.UUID
-		}{{pl.DepBlocks, in.Blocks}, {pl.DepRelates, in.Relates}} {
-			if set.targets == nil {
-				continue
-			}
-			targets, err := s.validDependencyTargets(ctx, tx, item, *set.targets)
-			if err != nil {
-				return err
-			}
-			if err := s.deps.Set(ctx, tx, itemID, set.kind, targets, p.WritingActorID(), now); err != nil {
-				return err
-			}
-		}
-
-		// After the write, inside the transaction. Checking beforehand would
-		// mean modelling the proposed graph in Go; checking here lets Postgres
-		// answer against the rows that actually exist, and the rollback undo
-		// them if the answer is a cycle.
-		if in.Blocks != nil {
-			if err := s.rejectCycle(ctx, tx, itemID); err != nil {
-				return err
-			}
-		}
-
-		out, err = s.deps.Outgoing(ctx, tx, itemID)
-		if err != nil {
-			return err
-		}
-		return audit.Write(ctx, tx, audit.Entry{
-			ProjectID:  &item.ProjectID,
-			ActorID:    p.WritingActorID(),
-			OnBehalfOf: p.OnBehalfOf(),
-			Action:     audit.ActionDependenciesSet,
-			SubjectID:  &item.ID,
-			Before:     publicDependencies(before),
-			After:      publicDependencies(out),
-		})
+		var err error
+		out, err = s.SetDependenciesInTx(ctx, tx, itemID, in, By(p))
+		return err
 	})
 	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+// SetDependenciesInTx is SetDependencies inside the caller's transaction.
+func (s *Service) SetDependenciesInTx(ctx context.Context, tx pgx.Tx, itemID uuid.UUID, in SetDependenciesInput, w Writer) ([]pl.Dependency, error) {
+	item, err := s.items.ByID(ctx, tx, itemID)
+	if err != nil {
+		return nil, err
+	}
+	subject, err := s.forItem(ctx, tx, w, item)
+	if err != nil {
+		return nil, err
+	}
+	if d := policy.CheckWrite(policy.KindWorkItem, []string{"dependencies"}, subject); d != nil {
+		return nil, d
+	}
+
+	before, err := s.deps.Outgoing(ctx, tx, itemID)
+	if err != nil {
+		return nil, err
+	}
+
+	now := time.Now()
+	for _, set := range []struct {
+		kind    pl.DependencyKind
+		targets *[]uuid.UUID
+	}{{pl.DepBlocks, in.Blocks}, {pl.DepRelates, in.Relates}} {
+		if set.targets == nil {
+			continue
+		}
+		targets, err := s.validDependencyTargets(ctx, tx, item, *set.targets)
+		if err != nil {
+			return nil, err
+		}
+		if err := s.deps.Set(ctx, tx, itemID, set.kind, targets, w.WritingActorID(), now); err != nil {
+			return nil, err
+		}
+	}
+
+	// After the write, inside the transaction. Checking beforehand would mean
+	// modelling the proposed graph in Go; checking here lets Postgres answer
+	// against the rows that actually exist, and the rollback undo them if the
+	// answer is a cycle.
+	if in.Blocks != nil {
+		if err := s.rejectCycle(ctx, tx, itemID); err != nil {
+			return nil, err
+		}
+	}
+
+	out, err := s.deps.Outgoing(ctx, tx, itemID)
+	if err != nil {
+		return nil, err
+	}
+	if err := audit.Write(ctx, tx, audit.Entry{
+		ProjectID:  &item.ProjectID,
+		ActorID:    w.WritingActorID(),
+		OnBehalfOf: w.OnBehalfOf(),
+		Action:     audit.ActionDependenciesSet,
+		SubjectID:  &item.ID,
+		Before:     publicDependencies(before),
+		After:      publicDependencies(out),
+	}); err != nil {
 		return nil, err
 	}
 	return out, nil
@@ -191,55 +201,93 @@ func ring(path []string) []string {
 // somebody meant.
 func (s *Service) SetEntityRefs(ctx context.Context, itemID uuid.UUID, entityIDs []uuid.UUID, p policy.Principal) ([]pl.EntityRef, error) {
 	var out []pl.EntityRef
-
 	err := s.db.InTx(ctx, func(tx pgx.Tx) error {
-		item, err := s.items.ByID(ctx, tx, itemID)
-		if err != nil {
-			return err
-		}
-		subject, err := s.forItem(ctx, tx, p, item)
-		if err != nil {
-			return err
-		}
-		if d := policy.CheckWrite(policy.KindWorkItem, []string{"entity_refs"}, subject); d != nil {
-			return d
-		}
-
-		before, err := s.refs.ListByItem(ctx, tx, itemID)
-		if err != nil {
-			return err
-		}
-
-		live, err := s.refs.ExistingIDs(ctx, tx, item.ProjectID, entityIDs)
-		if err != nil {
-			return err
-		}
-		for _, id := range entityIDs {
-			if !live[id] {
-				return fmt.Errorf("%w: there is no live catalog entity %s in this project", domain.ErrNotFound, id)
-			}
-		}
-
-		if err := s.refs.Set(ctx, tx, itemID, entityIDs, pl.RefImplements, p.WritingActorID()); err != nil {
-			return err
-		}
-
-		out, err = s.refs.ListByItem(ctx, tx, itemID)
-		if err != nil {
-			return err
-		}
-		return audit.Write(ctx, tx, audit.Entry{
-			ProjectID:  &item.ProjectID,
-			ActorID:    p.WritingActorID(),
-			OnBehalfOf: p.OnBehalfOf(),
-			Action:     audit.ActionEntityRefsSet,
-			SubjectID:  &item.ID,
-			Before:     publicRefs(before),
-			After:      publicRefs(out),
-		})
+		var err error
+		out, err = s.SetEntityRefsInTx(ctx, tx, itemID, entityIDs, By(p))
+		return err
 	})
 	if err != nil {
 		return nil, err
+	}
+	return out, nil
+}
+
+// SetEntityRefsInTx is SetEntityRefs inside the caller's transaction.
+func (s *Service) SetEntityRefsInTx(ctx context.Context, tx pgx.Tx, itemID uuid.UUID, entityIDs []uuid.UUID, w Writer) ([]pl.EntityRef, error) {
+	item, err := s.items.ByID(ctx, tx, itemID)
+	if err != nil {
+		return nil, err
+	}
+	subject, err := s.forItem(ctx, tx, w, item)
+	if err != nil {
+		return nil, err
+	}
+	if d := policy.CheckWrite(policy.KindWorkItem, []string{"entity_refs"}, subject); d != nil {
+		return nil, d
+	}
+
+	before, err := s.refs.ListByItem(ctx, tx, itemID)
+	if err != nil {
+		return nil, err
+	}
+
+	live, err := s.refs.ExistingIDs(ctx, tx, item.ProjectID, entityIDs)
+	if err != nil {
+		return nil, err
+	}
+	for _, id := range entityIDs {
+		if !live[id] {
+			return nil, fmt.Errorf("%w: there is no live catalog entity %s in this project", domain.ErrNotFound, id)
+		}
+	}
+
+	if err := s.refs.Set(ctx, tx, itemID, entityIDs, pl.RefImplements, w.WritingActorID()); err != nil {
+		return nil, err
+	}
+
+	out, err := s.refs.ListByItem(ctx, tx, itemID)
+	if err != nil {
+		return nil, err
+	}
+	if err := audit.Write(ctx, tx, audit.Entry{
+		ProjectID:  &item.ProjectID,
+		ActorID:    w.WritingActorID(),
+		OnBehalfOf: w.OnBehalfOf(),
+		Action:     audit.ActionEntityRefsSet,
+		SubjectID:  &item.ID,
+		Before:     publicRefs(before),
+		After:      publicRefs(out),
+	}); err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+// EntityIDsForSlugs resolves the slugs a proposal names into entity ids.
+//
+// Slugs rather than ids because that is what a model can actually say: it reads
+// the graph as slugs and has never seen a catalog entity's uuid. An unknown one
+// is an error naming it, not a silent drop — a reference list that quietly lost
+// an entry is exactly the "guessed reference" §3.5 refuses.
+func (s *Service) EntityIDsForSlugs(ctx context.Context, q store.Querier, projectID uuid.UUID, slugs []string) ([]uuid.UUID, error) {
+	out := make([]uuid.UUID, 0, len(slugs))
+	for _, raw := range slugs {
+		slug := strings.TrimSpace(raw)
+		if slug == "" {
+			continue
+		}
+		if id, err := uuid.Parse(slug); err == nil {
+			out = append(out, id)
+			continue
+		}
+		e, err := s.entities.BySlug(ctx, q, projectID, slug)
+		if err != nil {
+			if isNotFound(err) {
+				return nil, fmt.Errorf("%w: there is no entity %q in this project", domain.ErrNotFound, slug)
+			}
+			return nil, err
+		}
+		out = append(out, e.ID)
 	}
 	return out, nil
 }

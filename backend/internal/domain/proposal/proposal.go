@@ -221,6 +221,12 @@ type Proposal struct {
 	// RaisedByName and DecidedByName are filled on read.
 	RaisedByName  string
 	DecidedByName string
+
+	// Conflicts is what a pending proposal's recorded premises no longer match.
+	// Computed on read, never stored: a stored flag is correct until the next
+	// write and stale for ever after, and "no conflicts" over a proposal that
+	// cannot land is worse than saying nothing.
+	Conflicts []Conflict
 }
 
 // Validate checks a proposal's invariants before it is written.

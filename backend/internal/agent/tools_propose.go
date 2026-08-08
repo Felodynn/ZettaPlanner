@@ -3,6 +3,7 @@ package agent
 import (
 	"context"
 	"fmt"
+	"sort"
 	"strings"
 	"time"
 
@@ -12,6 +13,8 @@ import (
 	"github.com/Felodynn/ZettaPlanner/backend/internal/audit"
 	dg "github.com/Felodynn/ZettaPlanner/backend/internal/domain/diagram"
 	pr "github.com/Felodynn/ZettaPlanner/backend/internal/domain/proposal"
+	diagramsvc "github.com/Felodynn/ZettaPlanner/backend/internal/service/diagram"
+	"github.com/Felodynn/ZettaPlanner/backend/internal/service/governance"
 )
 
 // Propose tools: the only route to anything the requesting user does not own.
@@ -110,6 +113,9 @@ func runProposePlanChange(ctx context.Context, s *session, a args) (Result, erro
 		}
 
 		change := pr.Change{Op: op, Target: target, After: c.obj("after")}
+		if err := validatePlanChange(target, op, change.After, i); err != nil {
+			return Result{}, err
+		}
 		if ref := c.str("ref"); ref != "" {
 			id, before, err := s.resolvePlanTarget(ctx, target, ref)
 			if err != nil {
@@ -118,12 +124,68 @@ func runProposePlanChange(ctx context.Context, s *session, a args) (Result, erro
 			change.TargetID = &id
 			change.Before = before
 		}
-		if op != pr.OpCreate && change.TargetID == nil {
-			return Result{}, refuse("change %d is an %s with no `ref`; say which %s it changes.", i+1, op, target)
+		if change.TargetID == nil && (op != pr.OpCreate || target == pr.ChangeSubTask) {
+			what := "which " + string(target) + " it changes"
+			if target == pr.ChangeSubTask {
+				what = "which work item it goes under"
+			}
+			return Result{}, refuse("change %d has no `ref`; say %s.", i+1, what)
 		}
 		changes = append(changes, change)
 	}
 	return s.raiseProposal(ctx, title, rationale, changes)
+}
+
+// validatePlanChange rejects a field the applier could not set, and a subtask
+// change that has nothing to change.
+//
+// Enforced here as well as at approve time, and the earlier one is the one that
+// matters: a proposal is read and agreed to by a person, and discovering after
+// they clicked approve that `owner` is not a field wastes exactly the resource
+// the whole system is trying to save. The list comes from §4.2 through the
+// ownership table, so it cannot drift from what will actually apply.
+func validatePlanChange(target pr.ChangeTarget, op pr.Op, after map[string]any, i int) error {
+	if target == pr.ChangeSubTask && op != pr.OpCreate {
+		return refuse("change %d would %s a subtask. A subtask has no manager-owned field (§4.2), so there is "+
+			"nothing on an existing one for a proposal to decide — its assignee edits it directly. "+
+			"Propose creating one, or say what should change in the conversation.", i+1, op)
+	}
+	if op == pr.OpDelete || len(after) == 0 {
+		return nil
+	}
+
+	settable := governance.SettableFields(target)
+	known := make(map[string]bool, len(settable))
+	for _, f := range settable {
+		known[f] = true
+	}
+	var unknown []string
+	for key := range after {
+		if !known[key] {
+			unknown = append(unknown, key)
+		}
+	}
+	if len(unknown) == 0 {
+		return nil
+	}
+	sort.Strings(unknown)
+	return refuse("change %d sets %s on a %s, which %s not a field of one. The fields you can set are: %s.",
+		i+1, strings.Join(quoted(unknown), ", "), target, isAre(len(unknown)), strings.Join(settable, ", "))
+}
+
+func quoted(in []string) []string {
+	out := make([]string, len(in))
+	for i, s := range in {
+		out[i] = "`" + s + "`"
+	}
+	return out
+}
+
+func isAre(n int) string {
+	if n == 1 {
+		return "is"
+	}
+	return "are"
 }
 
 func runProposeDiagramChange(ctx context.Context, s *session, a args) (Result, error) {
@@ -153,6 +215,16 @@ func runProposeDiagramChange(ctx context.Context, s *session, a args) (Result, e
 		return Result{}, refuse("a proposal with no changes proposes nothing.")
 	}
 
+	// The graph as it stands, read once. Every update and delete records what it
+	// found here as `before`, which is what lets the approval step notice that
+	// the premise has gone (§5.1). Without it a proposal to re-kind a box would
+	// still apply after somebody had already re-kinded it differently, silently
+	// reverting their decision.
+	view, err := s.deps.Diagrams.Get(ctx, diagram.ID, s.principal)
+	if err != nil {
+		return Result{}, err
+	}
+
 	changes := make([]pr.Change, 0, len(raw))
 	for i, c := range raw {
 		target := pr.ChangeTarget(c.str("target"))
@@ -178,10 +250,62 @@ func runProposeDiagramChange(ctx context.Context, s *session, a args) (Result, e
 		}
 		after["diagram"] = diagram.Slug
 
+		before, err := graphBefore(view.Graph, diagram, target, op, after, i)
+		if err != nil {
+			return Result{}, err
+		}
+
 		id := diagram.ID
-		changes = append(changes, pr.Change{Op: op, Target: target, TargetID: &id, After: after})
+		changes = append(changes, pr.Change{Op: op, Target: target, TargetID: &id, After: after, Before: before})
 	}
 	return s.raiseProposal(ctx, title, rationale, changes)
+}
+
+// graphBefore records the state a diagram change is raised against.
+//
+// A create has no premise about an existing element, so it records nothing. An
+// update or a delete that names something the diagram does not contain is
+// refused **here**, while the model can still fix it, rather than becoming a
+// proposal a human reads, agrees with, and cannot apply.
+func graphBefore(
+	g *dg.Graph, d *dg.Diagram, target pr.ChangeTarget, op pr.Op, after map[string]any, i int,
+) (map[string]any, error) {
+	if op == pr.OpCreate {
+		return nil, nil
+	}
+	get := func(key string) string {
+		if v, ok := after[key]; ok && v != nil {
+			return strings.TrimSpace(fmt.Sprint(v))
+		}
+		return ""
+	}
+
+	switch target {
+	case pr.ChangeDiagram:
+		return map[string]any{"slug": d.Slug, "name": d.Name, "level": string(d.Level)}, nil
+
+	case pr.ChangeNode:
+		slug := get("slug")
+		if slug == "" {
+			slug = dg.Slugify(get("name"))
+		}
+		n := diagramsvc.FindNode(g, slug)
+		if n == nil {
+			return nil, refuse("change %d names the node `%s`, which is not in this diagram. "+
+				"Call `get_diagram` to see what is, or propose creating it with op `create`.", i+1, slug)
+		}
+		return diagramsvc.NodeSnapshot(n), nil
+
+	case pr.ChangeEdge:
+		from, to, rel := get("from"), get("to"), dg.Relation(get("relation"))
+		e := diagramsvc.FindEdge(g, from, to, rel)
+		if e == nil {
+			return nil, refuse("change %d names the arrow `%s %s %s`, which is not in this diagram. "+
+				"Call `get_diagram` to see what is, or propose creating it with op `create`.", i+1, from, rel, to)
+		}
+		return diagramsvc.EdgeSnapshot(g, e), nil
+	}
+	return nil, nil
 }
 
 // validateDiagramChange enforces the closed vocabulary at the moment of

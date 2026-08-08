@@ -320,6 +320,14 @@ Plus `origin_revision` (or `origin_proposal_id`) and `actor_id`.
 exactly which of its extractions a human corrected. That is the single
 highest-signal input it will ever receive about where its reading was weak.
 
+**A node's provenance is the stronger of its own and its entity's.** A node is a
+*placement*; its kind, name and summary live on the catalog entity. So a person
+who corrects "this is a queue, not a datastore" changes the entity and leaves
+the placement exactly as the extraction wrote it — and anything reading the
+placement alone concludes nobody looked. Every consumer of provenance takes the
+effective value, and a correction to an entity is recorded as a change to each
+diagram showing it, with its own revision (D56).
+
 ---
 
 ## 4. Roles, actors, permissions
@@ -406,8 +414,35 @@ state (the target moved since the proposal was raised), the whole proposal is
 rejected as `superseded` and the conflict is reported — never partially applied,
 never auto-merged.
 
+**What "the target moved" means, precisely:** a change's premise is every field
+it would *write* plus the target's continued existence. Not every field the
+proposal happened to record: the propose tools capture a fixed snapshot whatever
+the change is about, so comparing all of it would mean a developer ticking a
+status supersedes every pending proposal about that item — and a conflict that
+fires constantly is one people learn to click past (D57). A deleted target is a
+conflict whatever the change was going to write.
+
+Conflicts are **computed on read as well as on approve**. `GET /proposals/{id}`
+returns them so a reviewer sees a stale proposal before spending attention on
+it; the approve path recomputes them inside the applying transaction, because a
+check made outside it is a check something can move underneath.
+
 Approval authority: `admin` and `manager` for anything; `developer` only for a
-proposal whose every change is confined to their own dev-owned fields.
+proposal whose every change is confined to their own dev-owned fields — which is
+decided by running the same field-ownership check the direct write path runs,
+with the approver's own standing, rather than by a second rulebook beside §4.2.
+
+**An approved proposal carries its own write authority.** It is the governed
+route through §4.2 in both directions: a manager may not patch `status`
+directly, and may approve a proposal that changes it. The difference is that a
+proposal is deliberate, carries a rationale, names an approver, and leaves an
+audit trail saying who raised it and who decided. That authority is expressed
+inside the ownership check rather than around it, and only the governance
+service may set it, only after the approval gate has run.
+
+**Rejecting is open to any project member**; approving is not. Refusing changes
+nothing, and requiring a manager to be present to record a reason is how the
+reason stops being recorded.
 
 ### 5.2 Rejection rationale is first-class
 
@@ -497,6 +532,25 @@ The user may ask the vision model to re-examine a diagram they have hand-edited.
 per-change accept/reject.
 
 A stray click must not silently rewrite a plan a human corrected by hand.
+
+The model is shown the **source pages the diagram was ingested from**, one call
+per page and never one call for the document (Q3), alongside the current graph
+with per-element provenance. A diagram with no ingest behind it — most of them —
+is re-read from its graph alone, and the proposal's rationale says so, because
+that is a weaker question than the flow is designed for.
+
+**The provenance is the point.** `human_created` and `human_edited` are
+presented to the model as decisions rather than candidates, and any correction
+that would overwrite one is **dropped by the harness and reported in the
+rationale** — a prompt is a request, and this is the one rule the flow cannot
+afford to have merely requested. What counts as human is the stronger of the
+node's own provenance and its entity's: a person who corrects a box's kind
+changes the entity, and reading the placement alone would conclude nobody had
+(D56).
+
+Re-evaluate is synchronous and bounded to a small number of pages per run. What
+it skipped is named in the response and in the rationale: "we re-read it" must
+never quietly mean "we re-read some of it".
 
 ---
 
@@ -1095,9 +1149,9 @@ GET    /api/v1/projects/{pid}/events            → SSE (§7.2)
 POST   /api/v1/turns/{id}/cancel                → any project member may
 
 GET    /api/v1/projects/{pid}/proposals         ?status=
-GET    /api/v1/proposals/{id}                   → changes + current conflicts
-POST   /api/v1/proposals/{id}/approve
-POST   /api/v1/proposals/{id}/reject            body: { rationale } — required
+GET    /api/v1/proposals/{id}                   → changes + current conflicts + can_approve
+POST   /api/v1/proposals/{id}/approve           → applies as one revision, or 409 superseded
+POST   /api/v1/proposals/{id}/reject            body: { rationale } — required, min 8 chars
 
 GET    /api/v1/projects/{pid}/notes             ?status=
 PATCH  /api/v1/notes/{id}

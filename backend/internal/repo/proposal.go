@@ -79,6 +79,37 @@ func (Proposals) Create(ctx context.Context, q store.Querier, p *pr.Proposal) er
 	return nil
 }
 
+// Decision is a proposal leaving `pending`.
+type Decision struct {
+	Status    pr.Status
+	DecidedBy uuid.UUID
+	// Rationale is required for a rejection, both here and by a CHECK on the
+	// table (§5.2). Two enforcements of one rule, because the field whose loss
+	// makes an agent re-propose what was refused is worth stating twice.
+	Rationale string
+	// AppliedRevision is the diagram revision an approval produced, when it
+	// produced one.
+	AppliedRevision *int
+}
+
+// Decide moves a proposal out of `pending`.
+//
+// Guarded on the current status, which is the concurrency control: two people
+// approving the same proposal at the same moment cannot both win, and the
+// second one is told it was already decided rather than applying it twice.
+func (Proposals) Decide(ctx context.Context, q store.Querier, id uuid.UUID, d Decision) (bool, error) {
+	const sql = `
+		UPDATE proposals
+		   SET status = $2, decided_by = $3, decided_at = now(),
+		       decision_rationale = nullif(btrim($4), ''), applied_revision = $5
+		 WHERE id = $1 AND status = 'pending'`
+	tag, err := q.Exec(ctx, sql, id, string(d.Status), d.DecidedBy, d.Rationale, d.AppliedRevision)
+	if err != nil {
+		return false, err
+	}
+	return tag.RowsAffected() == 1, nil
+}
+
 // ByID returns one proposal with its changes in order.
 func (Proposals) ByID(ctx context.Context, q store.Querier, id uuid.UUID) (*pr.Proposal, error) {
 	const sql = `

@@ -172,6 +172,20 @@ func (s *Service) loadDetail(ctx context.Context, q store.Querier, item *pl.Work
 
 // CreateWorkItem makes a work item. Manager-owned (§4.2).
 func (s *Service) CreateWorkItem(ctx context.Context, in CreateWorkItemInput, p policy.Principal) (*pl.WorkItem, error) {
+	var created *pl.WorkItem
+	err := s.db.InTx(ctx, func(tx pgx.Tx) error {
+		var err error
+		created, err = s.CreateWorkItemInTx(ctx, tx, in, By(p))
+		return err
+	})
+	if err != nil {
+		return nil, err
+	}
+	return created, nil
+}
+
+// CreateWorkItemInTx is CreateWorkItem inside the caller's transaction.
+func (s *Service) CreateWorkItemInTx(ctx context.Context, tx pgx.Tx, in CreateWorkItemInput, w Writer) (*pl.WorkItem, error) {
 	start, err := pl.ParseDate(in.StartDate)
 	if err != nil {
 		return nil, err
@@ -194,73 +208,68 @@ func (s *Service) CreateWorkItem(ctx context.Context, in CreateWorkItemInput, p 
 		status = pl.StatusTodo
 	}
 
-	var created *pl.WorkItem
-	err = s.db.InTx(ctx, func(tx pgx.Tx) error {
-		subject, err := s.subject(ctx, tx, p, in.ProjectID)
-		if err != nil {
-			return err
-		}
-		if d := policy.CheckCreate(policy.KindWorkItem, subject); d != nil {
-			return d
-		}
-		if _, err := s.projects.ByID(ctx, tx, in.ProjectID); err != nil {
-			return err
-		}
-		if err := s.milestoneMustBelong(ctx, tx, in.ProjectID, milestoneID); err != nil {
-			return err
-		}
-		if err := s.assigneeMustBeAMember(ctx, tx, in.ProjectID, assigneeID); err != nil {
-			return err
-		}
-
-		// Issued inside the transaction. The UPDATE ... RETURNING behind it
-		// takes a row lock, which is what serializes two concurrent creates in
-		// the same project into two different refs.
-		ref, err := s.projects.NextRef(ctx, tx, in.ProjectID)
-		if err != nil {
-			return err
-		}
-
-		now := time.Now()
-		w := &pl.WorkItem{
-			ID:          uuid.Must(uuid.NewV7()),
-			ProjectID:   in.ProjectID,
-			MilestoneID: milestoneID,
-			Ref:         ref,
-			Title:       strings.TrimSpace(in.Title),
-			Intent:      strings.TrimSpace(in.Intent),
-			Acceptance:  strings.TrimSpace(in.Acceptance),
-			Status:      status,
-			Priority:    pl.Priority(strings.TrimSpace(in.Priority)),
-			AssigneeID:  assigneeID,
-			StartDate:   start,
-			DueDate:     due,
-			Provenance:  provenanceFor(p, "", true),
-			ActorID:     p.WritingActorID(),
-			CreatedAt:   now,
-			UpdatedAt:   now,
-		}
-		if err := pl.ValidateWorkItem(w); err != nil {
-			return err
-		}
-		if err := s.items.Create(ctx, tx, w); err != nil {
-			return err
-		}
-
-		created = w
-		return audit.Write(ctx, tx, audit.Entry{
-			ProjectID:  &in.ProjectID,
-			ActorID:    p.WritingActorID(),
-			OnBehalfOf: p.OnBehalfOf(),
-			Action:     audit.ActionWorkItemCreated,
-			SubjectID:  &w.ID,
-			After:      publicWorkItem(w),
-		})
-	})
+	subject, err := s.subject(ctx, tx, w, in.ProjectID)
 	if err != nil {
 		return nil, err
 	}
-	return created, nil
+	if d := policy.CheckCreate(policy.KindWorkItem, subject); d != nil {
+		return nil, d
+	}
+	if _, err := s.projects.ByID(ctx, tx, in.ProjectID); err != nil {
+		return nil, err
+	}
+	if err := s.milestoneMustBelong(ctx, tx, in.ProjectID, milestoneID); err != nil {
+		return nil, err
+	}
+	if err := s.assigneeMustBeAMember(ctx, tx, in.ProjectID, assigneeID); err != nil {
+		return nil, err
+	}
+
+	// Issued inside the transaction. The UPDATE ... RETURNING behind it takes a
+	// row lock, which is what serializes two concurrent creates in the same
+	// project into two different refs.
+	ref, err := s.projects.NextRef(ctx, tx, in.ProjectID)
+	if err != nil {
+		return nil, err
+	}
+
+	now := time.Now()
+	item := &pl.WorkItem{
+		ID:          uuid.Must(uuid.NewV7()),
+		ProjectID:   in.ProjectID,
+		MilestoneID: milestoneID,
+		Ref:         ref,
+		Title:       strings.TrimSpace(in.Title),
+		Intent:      strings.TrimSpace(in.Intent),
+		Acceptance:  strings.TrimSpace(in.Acceptance),
+		Status:      status,
+		Priority:    pl.Priority(strings.TrimSpace(in.Priority)),
+		AssigneeID:  assigneeID,
+		StartDate:   start,
+		DueDate:     due,
+		Provenance:  provenanceFor(w.Principal, "", true),
+		ActorID:     w.WritingActorID(),
+		CreatedAt:   now,
+		UpdatedAt:   now,
+	}
+	if err := pl.ValidateWorkItem(item); err != nil {
+		return nil, err
+	}
+	if err := s.items.Create(ctx, tx, item); err != nil {
+		return nil, err
+	}
+
+	if err := audit.Write(ctx, tx, audit.Entry{
+		ProjectID:  &in.ProjectID,
+		ActorID:    w.WritingActorID(),
+		OnBehalfOf: w.OnBehalfOf(),
+		Action:     audit.ActionWorkItemCreated,
+		SubjectID:  &item.ID,
+		After:      publicWorkItem(item),
+	}); err != nil {
+		return nil, err
+	}
+	return item, nil
 }
 
 // UpdateWorkItemInput is a patch. See UpdateMilestoneInput on why the optional
@@ -290,121 +299,9 @@ type UpdateWorkItemInput struct {
 // tiers, and status is the developer's report of reality.
 func (s *Service) UpdateWorkItem(ctx context.Context, id uuid.UUID, in UpdateWorkItemInput, p policy.Principal) (*ItemDetail, error) {
 	var out *ItemDetail
-
 	err := s.db.InTx(ctx, func(tx pgx.Tx) error {
-		w, err := s.items.ByID(ctx, tx, id)
-		if err != nil {
-			return err
-		}
-		subject, err := s.forItem(ctx, tx, p, w)
-		if err != nil {
-			return err
-		}
-		if d := policy.CheckWrite(policy.KindWorkItem, in.Fields, subject); d != nil {
-			return d
-		}
-
-		before := publicWorkItem(w)
-		beforeStatus, beforeAssignee, beforeMilestone := w.Status, w.AssigneeID, w.MilestoneID
-
-		if in.Title != nil {
-			w.Title = strings.TrimSpace(*in.Title)
-		}
-		if in.Intent != nil {
-			w.Intent = strings.TrimSpace(*in.Intent)
-		}
-		if in.Acceptance != nil {
-			w.Acceptance = strings.TrimSpace(*in.Acceptance)
-		}
-		if in.Status != nil {
-			w.Status = pl.Status(strings.TrimSpace(*in.Status))
-		}
-		if in.ProgressPct != nil {
-			w.ProgressPct = *in.ProgressPct
-		}
-		if in.Priority != nil {
-			w.Priority = pl.Priority(strings.TrimSpace(*in.Priority))
-		}
-		if in.StartDate != nil {
-			if w.StartDate, err = pl.ParseDate(*in.StartDate); err != nil {
-				return err
-			}
-		}
-		if in.DueDate != nil {
-			if w.DueDate, err = pl.ParseDate(*in.DueDate); err != nil {
-				return err
-			}
-		}
-		if in.AssigneeID != nil {
-			if w.AssigneeID, err = parseOptionalUUID("assignee_id", *in.AssigneeID); err != nil {
-				return err
-			}
-			if err := s.assigneeMustBeAMember(ctx, tx, w.ProjectID, w.AssigneeID); err != nil {
-				return err
-			}
-		}
-		if in.MilestoneID != nil {
-			if w.MilestoneID, err = parseOptionalUUID("milestone_id", *in.MilestoneID); err != nil {
-				return err
-			}
-			if err := s.milestoneMustBelong(ctx, tx, w.ProjectID, w.MilestoneID); err != nil {
-				return err
-			}
-		}
-
-		w.Provenance = provenanceFor(p, w.Provenance, false)
-		if err := pl.ValidateWorkItem(w); err != nil {
-			return err
-		}
-		if err := s.items.Update(ctx, tx, w); err != nil {
-			return err
-		}
-
-		after := publicWorkItem(w)
-		entry := func(action audit.Action, b, a any) error {
-			return audit.Write(ctx, tx, audit.Entry{
-				ProjectID:  &w.ProjectID,
-				ActorID:    p.WritingActorID(),
-				OnBehalfOf: p.OnBehalfOf(),
-				Action:     action,
-				SubjectID:  &w.ID,
-				Before:     b,
-				After:      a,
-			})
-		}
-
-		// Three transitions and one generic edit, each written only when it
-		// actually happened. A single PATCH can produce all four; they share
-		// the request id, which is what groups them back into one operation
-		// without flattening four distinct facts into one row.
-		if changed(beforeStatus, w.Status) {
-			if err := entry(audit.ActionWorkItemStatusChanged,
-				map[string]any{"status": string(beforeStatus)},
-				map[string]any{"status": string(w.Status)}); err != nil {
-				return err
-			}
-		}
-		if !sameUUID(beforeAssignee, w.AssigneeID) {
-			if err := entry(audit.ActionWorkItemAssigned,
-				map[string]any{"assignee_id": uuidString(beforeAssignee)},
-				map[string]any{"assignee_id": uuidString(w.AssigneeID)}); err != nil {
-				return err
-			}
-		}
-		if !sameUUID(beforeMilestone, w.MilestoneID) {
-			if err := entry(audit.ActionWorkItemMoved,
-				map[string]any{"milestone_id": uuidString(beforeMilestone)},
-				map[string]any{"milestone_id": uuidString(w.MilestoneID)}); err != nil {
-				return err
-			}
-		}
-		if changedBeyondStatus(before, after, "assignee_id", "milestone_id") {
-			if err := entry(audit.ActionWorkItemUpdated, before, after); err != nil {
-				return err
-			}
-		}
-
-		out, err = s.loadDetail(ctx, tx, w)
+		var err error
+		out, err = s.UpdateWorkItemInTx(ctx, tx, id, in, By(p))
 		return err
 	})
 	if err != nil {
@@ -413,31 +310,153 @@ func (s *Service) UpdateWorkItem(ctx context.Context, id uuid.UUID, in UpdateWor
 	return out, nil
 }
 
+// UpdateWorkItemInTx is UpdateWorkItem inside the caller's transaction.
+func (s *Service) UpdateWorkItemInTx(ctx context.Context, tx pgx.Tx, id uuid.UUID, in UpdateWorkItemInput, wr Writer) (*ItemDetail, error) {
+	w, err := s.items.ByID(ctx, tx, id)
+	if err != nil {
+		return nil, err
+	}
+	subject, err := s.forItem(ctx, tx, wr, w)
+	if err != nil {
+		return nil, err
+	}
+	if d := policy.CheckWrite(policy.KindWorkItem, in.Fields, subject); d != nil {
+		return nil, d
+	}
+
+	before := publicWorkItem(w)
+	beforeStatus, beforeAssignee, beforeMilestone := w.Status, w.AssigneeID, w.MilestoneID
+
+	if in.Title != nil {
+		w.Title = strings.TrimSpace(*in.Title)
+	}
+	if in.Intent != nil {
+		w.Intent = strings.TrimSpace(*in.Intent)
+	}
+	if in.Acceptance != nil {
+		w.Acceptance = strings.TrimSpace(*in.Acceptance)
+	}
+	if in.Status != nil {
+		w.Status = pl.Status(strings.TrimSpace(*in.Status))
+	}
+	if in.ProgressPct != nil {
+		w.ProgressPct = *in.ProgressPct
+	}
+	if in.Priority != nil {
+		w.Priority = pl.Priority(strings.TrimSpace(*in.Priority))
+	}
+	if in.StartDate != nil {
+		if w.StartDate, err = pl.ParseDate(*in.StartDate); err != nil {
+			return nil, err
+		}
+	}
+	if in.DueDate != nil {
+		if w.DueDate, err = pl.ParseDate(*in.DueDate); err != nil {
+			return nil, err
+		}
+	}
+	if in.AssigneeID != nil {
+		if w.AssigneeID, err = parseOptionalUUID("assignee_id", *in.AssigneeID); err != nil {
+			return nil, err
+		}
+		if err := s.assigneeMustBeAMember(ctx, tx, w.ProjectID, w.AssigneeID); err != nil {
+			return nil, err
+		}
+	}
+	if in.MilestoneID != nil {
+		if w.MilestoneID, err = parseOptionalUUID("milestone_id", *in.MilestoneID); err != nil {
+			return nil, err
+		}
+		if err := s.milestoneMustBelong(ctx, tx, w.ProjectID, w.MilestoneID); err != nil {
+			return nil, err
+		}
+	}
+
+	w.Provenance = provenanceFor(wr.Principal, w.Provenance, false)
+	if err := pl.ValidateWorkItem(w); err != nil {
+		return nil, err
+	}
+	if err := s.items.Update(ctx, tx, w); err != nil {
+		return nil, err
+	}
+
+	after := publicWorkItem(w)
+	entry := func(action audit.Action, b, a any) error {
+		return audit.Write(ctx, tx, audit.Entry{
+			ProjectID:  &w.ProjectID,
+			ActorID:    wr.WritingActorID(),
+			OnBehalfOf: wr.OnBehalfOf(),
+			Action:     action,
+			SubjectID:  &w.ID,
+			Before:     b,
+			After:      a,
+		})
+	}
+
+	// Three transitions and one generic edit, each written only when it actually
+	// happened. A single PATCH can produce all four; they share the request id,
+	// which is what groups them back into one operation without flattening four
+	// distinct facts into one row.
+	if changed(beforeStatus, w.Status) {
+		if err := entry(audit.ActionWorkItemStatusChanged,
+			map[string]any{"status": string(beforeStatus)},
+			map[string]any{"status": string(w.Status)}); err != nil {
+			return nil, err
+		}
+	}
+	if !sameUUID(beforeAssignee, w.AssigneeID) {
+		if err := entry(audit.ActionWorkItemAssigned,
+			map[string]any{"assignee_id": uuidString(beforeAssignee)},
+			map[string]any{"assignee_id": uuidString(w.AssigneeID)}); err != nil {
+			return nil, err
+		}
+	}
+	if !sameUUID(beforeMilestone, w.MilestoneID) {
+		if err := entry(audit.ActionWorkItemMoved,
+			map[string]any{"milestone_id": uuidString(beforeMilestone)},
+			map[string]any{"milestone_id": uuidString(w.MilestoneID)}); err != nil {
+			return nil, err
+		}
+	}
+	if changedBeyondStatus(before, after, "assignee_id", "milestone_id") {
+		if err := entry(audit.ActionWorkItemUpdated, before, after); err != nil {
+			return nil, err
+		}
+	}
+
+	return s.loadDetail(ctx, tx, w)
+}
+
 // DeleteWorkItem soft-deletes a work item.
 func (s *Service) DeleteWorkItem(ctx context.Context, id uuid.UUID, p policy.Principal) error {
 	return s.db.InTx(ctx, func(tx pgx.Tx) error {
-		w, err := s.items.ByID(ctx, tx, id)
-		if err != nil {
-			return err
-		}
-		subject, err := s.forItem(ctx, tx, p, w)
-		if err != nil {
-			return err
-		}
-		if d := policy.CheckDelete(policy.KindWorkItem, subject); d != nil {
-			return d
-		}
-		if err := s.items.Delete(ctx, tx, id); err != nil {
-			return err
-		}
-		return audit.Write(ctx, tx, audit.Entry{
-			ProjectID:  &w.ProjectID,
-			ActorID:    p.WritingActorID(),
-			OnBehalfOf: p.OnBehalfOf(),
-			Action:     audit.ActionWorkItemDeleted,
-			SubjectID:  &w.ID,
-			Before:     publicWorkItem(w),
-		})
+		return s.DeleteWorkItemInTx(ctx, tx, id, By(p))
+	})
+}
+
+// DeleteWorkItemInTx is DeleteWorkItem inside the caller's transaction.
+func (s *Service) DeleteWorkItemInTx(ctx context.Context, tx pgx.Tx, id uuid.UUID, wr Writer) error {
+	w, err := s.items.ByID(ctx, tx, id)
+	if err != nil {
+		return err
+	}
+	subject, err := s.forItem(ctx, tx, wr, w)
+	if err != nil {
+		return err
+	}
+	if d := policy.CheckDelete(policy.KindWorkItem, subject); d != nil {
+		return d
+	}
+	if err := s.items.Delete(ctx, tx, id); err != nil {
+		return err
+	}
+	return audit.Write(ctx, tx, audit.Entry{
+		ProjectID:  &w.ProjectID,
+		ActorID:    wr.WritingActorID(),
+		OnBehalfOf: wr.OnBehalfOf(),
+		Action:     audit.ActionWorkItemDeleted,
+		SubjectID:  &w.ID,
+		Before:     publicWorkItem(w),
 	})
 }
 
