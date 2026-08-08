@@ -1,0 +1,99 @@
+import type { ReactNode } from 'react'
+import { Navigate, Outlet, Route, Routes, useParams } from 'react-router-dom'
+import { ApiError } from '@/api/errors'
+import { LoginPage } from '@/auth/LoginPage'
+import { SessionProvider, useMeQuery, useSession, useSessionExpiry } from '@/auth/session'
+import { ErrorBoundary } from '@/components/ErrorBoundary'
+import { Loading, EmptyState } from '@/components/ui/primitives'
+import { Placeholder } from '@/components/Placeholder'
+import { AppShell } from '@/layout/AppShell'
+import { ProjectPicker } from '@/features/project/ProjectPicker'
+import { ProjectOverview } from '@/features/project/ProjectOverview'
+
+/**
+ * Refuses a project route to a non-member.
+ *
+ * Membership is the boundary, not role (§7.1, D63) — a developer sees the
+ * whole project including its audit trail, and a non-member sees none of it.
+ * The backend enforces this on every call; this only avoids rendering a shell
+ * around a screenful of 403s.
+ */
+function RequireMembership({ children }: { children: ReactNode }) {
+  const { projectId } = useParams()
+  const { isMemberOf, user } = useSession()
+
+  if (!projectId) return <Navigate to="/" replace />
+  if (!isMemberOf(projectId) && user.role !== 'admin') {
+    return (
+      <EmptyState
+        title="You are not a member of this project"
+        body="Membership is what grants access to a project, including its history. An administrator can add you."
+      />
+    )
+  }
+  return <>{children}</>
+}
+
+function ProjectRoutes() {
+  return (
+    <RequireMembership>
+      <ErrorBoundary what="This project">
+        <Outlet />
+      </ErrorBoundary>
+    </RequireMembership>
+  )
+}
+
+function AuthedApp() {
+  useSessionExpiry()
+
+  return (
+    <Routes>
+      <Route element={<AppShell />}>
+        <Route path="/" element={<ProjectPicker />} />
+
+        <Route path="/p/:projectId" element={<ProjectRoutes />}>
+          <Route index element={<ProjectOverview />} />
+          <Route path="thread" element={<Placeholder phase="F1" what="The project thread" />} />
+          <Route path="plan/*" element={<Placeholder phase="F2" what="Plan views" />} />
+          <Route path="mine" element={<Placeholder phase="F2" what="My tasks" />} />
+          <Route path="diagrams/*" element={<Placeholder phase="F3" what="Diagrams" />} />
+          <Route path="ingest/*" element={<Placeholder phase="F5" what="Ingest review" />} />
+          <Route path="proposals/*" element={<Placeholder phase="F6" what="Proposals" />} />
+          <Route path="notes" element={<Placeholder phase="F2" what="Notes" />} />
+          <Route path="audit" element={<Placeholder phase="F7" what="The audit view" />} />
+          <Route path="settings" element={<Placeholder phase="F7" what="Project settings" />} />
+        </Route>
+
+        <Route path="*" element={<EmptyState title="No such page" />} />
+      </Route>
+    </Routes>
+  )
+}
+
+export function App() {
+  const me = useMeQuery()
+
+  if (me.isPending) {
+    return (
+      <div className="flex h-full items-center justify-center">
+        <Loading what="your session" />
+      </div>
+    )
+  }
+
+  // Not signed in is an answer, not a failure. Anything else that stopped the
+  // session lookup is shown on the login page rather than swallowed, because
+  // "the password box does nothing" is the worst version of a backend that is
+  // down.
+  if (me.error) {
+    const signedOut = me.error instanceof ApiError && me.error.isAuth
+    return <LoginPage {...(signedOut ? {} : { reason: me.error.message })} />
+  }
+
+  return (
+    <SessionProvider me={me.data}>
+      <AuthedApp />
+    </SessionProvider>
+  )
+}

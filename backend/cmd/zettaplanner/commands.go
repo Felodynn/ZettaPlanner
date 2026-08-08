@@ -418,7 +418,30 @@ func cmdOpenAPI(_ context.Context, args []string) error {
 	// Deliberately no database and no model server: the document describes the
 	// API's shape, and needing infrastructure to print it would make it
 	// impossible to generate the frontend client in CI.
-	srv := httpapi.New(httpapi.Deps{Log: slog.New(slog.DiscardHandler)})
+	//
+	// The services are constructed over a nil pool all the same, because
+	// httpapi.New registers each group of routes only when its dependency is
+	// present — a document built from an empty Deps describes /health and
+	// nothing else, which is a generated client with no API in it. None of
+	// these constructors touches the database; they assign fields, and route
+	// registration never calls a handler.
+	discard := slog.New(slog.DiscardHandler)
+	var db *store.DB
+	diagramSvc := diagramsvc.New(db, discard, 0)
+	contextSvc := contextsvc.New(db, discard, nil)
+	planSvc := plansvc.New(db, discard, contextSvc)
+	srv := httpapi.New(httpapi.Deps{
+		Auth:       auth.New(db, discard, 0),
+		Projects:   project.New(db, discard),
+		Diagrams:   diagramSvc,
+		Ingests:    ingestsvc.New(db, discard, nil, diagramSvc, ""),
+		Plan:       planSvc,
+		Context:    contextSvc,
+		Threads:    threadsvc.New(db, discard, nil, nil),
+		Governance: governance.New(db, discard, planSvc, diagramSvc, nil, nil),
+		Export:     export.New(db, discard),
+		Log:        discard,
+	})
 
 	var (
 		out []byte

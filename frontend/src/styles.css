@@ -1,0 +1,334 @@
+@import 'tailwindcss';
+
+/* ═══════════════════════════════════════════════════════════════════════════
+   Theme
+   ───────────────────────────────────────────────────────────────────────────
+   Two axes, both chosen on the device and stored there (no backend):
+
+     data-theme  = light | dark      dark is OLED — the canvas is true black,
+                                     so an emissive panel powers those pixels
+                                     off rather than lighting them dark grey.
+     data-accent = gold | amber | …  the one hue the product uses to mean
+                                     "this is yours to act on". Default gold.
+
+   Every colour below is declared twice, once per mode, because a palette that
+   only redefines a few tokens under a dark selector leaves the rest borrowing
+   light values — which is exactly how a dark theme ends up with one blinding
+   panel in the corner.
+
+   `@theme inline` matters: it makes the generated utilities emit
+   `var(--zp-…)` rather than baking a resolved colour in, which is what lets
+   the whole page re-theme by flipping one attribute on <html>.
+   ══════════════════════════════════════════════════════════════════════════ */
+
+@theme inline {
+  --font-sans:
+    'Inter var', 'Inter', ui-sans-serif, system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif;
+  --font-mono: 'JetBrains Mono', ui-monospace, 'SF Mono', Menlo, Consolas, monospace;
+
+  --color-canvas: var(--zp-canvas);
+  --color-surface: var(--zp-surface);
+  --color-raised: var(--zp-raised);
+  --color-sunken: var(--zp-sunken);
+  --color-line: var(--zp-line);
+  --color-line-strong: var(--zp-line-strong);
+
+  --color-ink: var(--zp-ink);
+  --color-ink-muted: var(--zp-ink-muted);
+  --color-ink-faint: var(--zp-ink-faint);
+
+  --color-accent: var(--zp-accent);
+  --color-accent-ink: var(--zp-accent-ink);
+  --color-accent-soft: var(--zp-accent-soft);
+  --color-accent-line: var(--zp-accent-line);
+  /* Text and icons *on* an accent fill. Not white: a golden-yellow button
+     with white text is unreadable, and hard-coding white is why accent
+     palettes usually cannot include yellow at all. */
+  --color-on-accent: var(--zp-on-accent);
+
+  --color-danger: var(--zp-danger);
+  --color-danger-soft: var(--zp-danger-soft);
+  --color-danger-ink: var(--zp-danger-ink);
+  --color-warn: var(--zp-warn);
+  --color-warn-soft: var(--zp-warn-soft);
+  --color-warn-ink: var(--zp-warn-ink);
+  --color-good: var(--zp-good);
+  --color-good-soft: var(--zp-good-soft);
+  --color-good-ink: var(--zp-good-ink);
+  --color-info: var(--zp-info);
+  --color-info-soft: var(--zp-info-soft);
+  --color-info-ink: var(--zp-info-ink);
+
+  --radius-card: 0.5rem;
+}
+
+/* ── neutrals: light ─────────────────────────────────────────────────────── */
+
+:root,
+[data-theme='light'] {
+  color-scheme: light;
+
+  --zp-canvas: oklch(98.5% 0.002 250);
+  --zp-surface: oklch(100% 0 0);
+  --zp-raised: oklch(100% 0 0);
+  --zp-sunken: oklch(96.5% 0.003 250);
+  --zp-line: oklch(91% 0.005 250);
+  --zp-line-strong: oklch(84% 0.008 250);
+
+  --zp-ink: oklch(24% 0.012 250);
+  --zp-ink-muted: oklch(48% 0.012 250);
+  --zp-ink-faint: oklch(63% 0.01 250);
+
+  --zp-danger: oklch(52% 0.2 25);
+  --zp-danger-soft: oklch(96% 0.028 25);
+  --zp-danger-ink: oklch(46% 0.18 25);
+  --zp-warn: oklch(62% 0.14 75);
+  --zp-warn-soft: oklch(96% 0.04 85);
+  --zp-warn-ink: oklch(48% 0.11 70);
+  --zp-good: oklch(52% 0.13 155);
+  --zp-good-soft: oklch(95.5% 0.04 155);
+  --zp-good-ink: oklch(45% 0.12 155);
+  --zp-info: oklch(55% 0.13 245);
+  --zp-info-soft: oklch(96% 0.035 245);
+  --zp-info-ink: oklch(47% 0.13 245);
+
+  --zp-shadow: 0 1px 2px oklch(24% 0.012 250 / 0.06), 0 1px 3px oklch(24% 0.012 250 / 0.04);
+  --zp-shadow-pop: 0 4px 12px oklch(24% 0.012 250 / 0.1), 0 2px 4px oklch(24% 0.012 250 / 0.06);
+}
+
+/* ── neutrals: OLED dark ─────────────────────────────────────────────────── */
+
+[data-theme='dark'] {
+  color-scheme: dark;
+
+  /* True black. The whole point of the mode. */
+  --zp-canvas: oklch(0% 0 0);
+  /* Panels lift off the black by a hair — enough to read as a surface,
+     little enough that a full-screen editor is still mostly unlit. */
+  --zp-surface: oklch(13.5% 0.004 250);
+  --zp-raised: oklch(18% 0.005 250);
+  --zp-sunken: oklch(7% 0.003 250);
+  --zp-line: oklch(24% 0.006 250);
+  --zp-line-strong: oklch(34% 0.008 250);
+
+  --zp-ink: oklch(94% 0.004 250);
+  --zp-ink-muted: oklch(71% 0.008 250);
+  --zp-ink-faint: oklch(55% 0.008 250);
+
+  --zp-danger: oklch(70% 0.18 25);
+  --zp-danger-soft: oklch(24% 0.06 25);
+  --zp-danger-ink: oklch(76% 0.16 25);
+  --zp-warn: oklch(80% 0.14 80);
+  --zp-warn-soft: oklch(24% 0.05 80);
+  --zp-warn-ink: oklch(84% 0.13 80);
+  --zp-good: oklch(73% 0.14 155);
+  --zp-good-soft: oklch(22% 0.05 155);
+  --zp-good-ink: oklch(80% 0.13 155);
+  --zp-info: oklch(72% 0.13 245);
+  --zp-info-soft: oklch(22% 0.05 245);
+  --zp-info-ink: oklch(80% 0.12 245);
+
+  --zp-shadow: 0 1px 2px oklch(0% 0 0 / 0.6), 0 1px 3px oklch(0% 0 0 / 0.4);
+  --zp-shadow-pop: 0 4px 16px oklch(0% 0 0 / 0.7), 0 2px 6px oklch(0% 0 0 / 0.5);
+}
+
+/* ═══ accents ══════════════════════════════════════════════════════════════
+   Each hue is hand-tuned per mode rather than derived from one formula.
+   A formula that puts every accent at the same lightness makes yellow muddy
+   and violet glaring — the eye does not read oklch lightness as constant
+   across hue at these chromas, whatever the number says.
+
+   Four tokens each:
+     accent      the solid fill (buttons, selected tabs)
+     on-accent   what is legible on top of that fill
+     accent-ink  accent-coloured *text* on the page background
+     accent-soft a tint for selected rows and badges
+   ══════════════════════════════════════════════════════════════════════════ */
+
+/* Gold — the default. */
+:root,
+[data-accent='gold'] {
+  --zp-accent: oklch(79% 0.145 86);
+  --zp-on-accent: oklch(21% 0.04 86);
+  --zp-accent-ink: oklch(48% 0.1 78);
+  --zp-accent-soft: oklch(96% 0.045 86);
+  --zp-accent-line: oklch(86% 0.09 86);
+}
+[data-theme='dark'][data-accent='gold'],
+[data-theme='dark']:root {
+  --zp-accent: oklch(82% 0.15 86);
+  --zp-on-accent: oklch(17% 0.035 86);
+  --zp-accent-ink: oklch(85% 0.13 86);
+  --zp-accent-soft: oklch(25% 0.05 86);
+  --zp-accent-line: oklch(38% 0.07 86);
+}
+
+[data-accent='amber'] {
+  --zp-accent: oklch(73% 0.155 62);
+  --zp-on-accent: oklch(20% 0.04 62);
+  --zp-accent-ink: oklch(50% 0.13 55);
+  --zp-accent-soft: oklch(96% 0.05 62);
+  --zp-accent-line: oklch(84% 0.1 62);
+}
+[data-theme='dark'][data-accent='amber'] {
+  --zp-accent: oklch(77% 0.16 62);
+  --zp-on-accent: oklch(17% 0.04 62);
+  --zp-accent-ink: oklch(81% 0.14 62);
+  --zp-accent-soft: oklch(25% 0.055 62);
+  --zp-accent-line: oklch(38% 0.08 62);
+}
+
+[data-accent='emerald'] {
+  --zp-accent: oklch(56% 0.14 158);
+  --zp-on-accent: oklch(99% 0.01 158);
+  --zp-accent-ink: oklch(46% 0.13 158);
+  --zp-accent-soft: oklch(95.5% 0.045 158);
+  --zp-accent-line: oklch(82% 0.09 158);
+}
+[data-theme='dark'][data-accent='emerald'] {
+  --zp-accent: oklch(72% 0.15 158);
+  --zp-on-accent: oklch(15% 0.03 158);
+  --zp-accent-ink: oklch(79% 0.14 158);
+  --zp-accent-soft: oklch(23% 0.05 158);
+  --zp-accent-line: oklch(36% 0.08 158);
+}
+
+[data-accent='teal'] {
+  --zp-accent: oklch(57% 0.11 205);
+  --zp-on-accent: oklch(99% 0.01 205);
+  --zp-accent-ink: oklch(47% 0.1 205);
+  --zp-accent-soft: oklch(95.5% 0.04 205);
+  --zp-accent-line: oklch(82% 0.07 205);
+}
+[data-theme='dark'][data-accent='teal'] {
+  --zp-accent: oklch(74% 0.11 205);
+  --zp-on-accent: oklch(15% 0.03 205);
+  --zp-accent-ink: oklch(81% 0.1 205);
+  --zp-accent-soft: oklch(23% 0.045 205);
+  --zp-accent-line: oklch(36% 0.07 205);
+}
+
+[data-accent='azure'] {
+  --zp-accent: oklch(56% 0.16 248);
+  --zp-on-accent: oklch(99% 0.01 248);
+  --zp-accent-ink: oklch(48% 0.15 248);
+  --zp-accent-soft: oklch(95.5% 0.045 248);
+  --zp-accent-line: oklch(82% 0.09 248);
+}
+[data-theme='dark'][data-accent='azure'] {
+  --zp-accent: oklch(70% 0.15 248);
+  --zp-on-accent: oklch(14% 0.03 248);
+  --zp-accent-ink: oklch(79% 0.13 248);
+  --zp-accent-soft: oklch(23% 0.055 248);
+  --zp-accent-line: oklch(36% 0.09 248);
+}
+
+[data-accent='indigo'] {
+  --zp-accent: oklch(53% 0.18 277);
+  --zp-on-accent: oklch(99% 0.01 277);
+  --zp-accent-ink: oklch(47% 0.17 277);
+  --zp-accent-soft: oklch(95.5% 0.042 277);
+  --zp-accent-line: oklch(82% 0.09 277);
+}
+[data-theme='dark'][data-accent='indigo'] {
+  --zp-accent: oklch(67% 0.17 277);
+  --zp-on-accent: oklch(14% 0.03 277);
+  --zp-accent-ink: oklch(78% 0.15 277);
+  --zp-accent-soft: oklch(24% 0.06 277);
+  --zp-accent-line: oklch(37% 0.1 277);
+}
+
+[data-accent='violet'] {
+  --zp-accent: oklch(56% 0.2 305);
+  --zp-on-accent: oklch(99% 0.01 305);
+  --zp-accent-ink: oklch(48% 0.18 305);
+  --zp-accent-soft: oklch(95.5% 0.045 305);
+  --zp-accent-line: oklch(82% 0.09 305);
+}
+[data-theme='dark'][data-accent='violet'] {
+  --zp-accent: oklch(69% 0.19 305);
+  --zp-on-accent: oklch(14% 0.03 305);
+  --zp-accent-ink: oklch(79% 0.16 305);
+  --zp-accent-soft: oklch(24% 0.06 305);
+  --zp-accent-line: oklch(37% 0.1 305);
+}
+
+[data-accent='magenta'] {
+  --zp-accent: oklch(57% 0.19 352);
+  --zp-on-accent: oklch(99% 0.01 352);
+  --zp-accent-ink: oklch(49% 0.18 352);
+  --zp-accent-soft: oklch(95.5% 0.045 352);
+  --zp-accent-line: oklch(82% 0.09 352);
+}
+[data-theme='dark'][data-accent='magenta'] {
+  --zp-accent: oklch(70% 0.19 352);
+  --zp-on-accent: oklch(14% 0.03 352);
+  --zp-accent-ink: oklch(80% 0.17 352);
+  --zp-accent-soft: oklch(24% 0.06 352);
+  --zp-accent-line: oklch(37% 0.1 352);
+}
+
+/* ── base ────────────────────────────────────────────────────────────────── */
+
+@layer base {
+  html,
+  body,
+  #root {
+    height: 100%;
+  }
+
+  body {
+    background: var(--zp-canvas);
+    color: var(--zp-ink);
+    font-family: var(--font-sans);
+    font-size: 0.875rem;
+    line-height: 1.5;
+    -webkit-font-smoothing: antialiased;
+  }
+
+  /* Only the deliberate switch animates. Without the guard, every hover and
+     every table row would crossfade too, and a dense list would smear. */
+  html[data-theme-animating] * {
+    transition:
+      background-color 140ms ease,
+      border-color 140ms ease,
+      color 140ms ease;
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    html[data-theme-animating] * {
+      transition: none;
+    }
+  }
+
+  :focus-visible {
+    outline: 2px solid var(--zp-accent);
+    outline-offset: 1px;
+    border-radius: 2px;
+  }
+
+  ::selection {
+    background: var(--zp-accent-soft);
+    color: var(--zp-ink);
+  }
+}
+
+@layer components {
+  .zp-scroll {
+    scrollbar-width: thin;
+    scrollbar-color: var(--zp-line-strong) transparent;
+  }
+
+  /* Anything that lines up in a column — dates, counts, percentages.
+     Proportional digits make a numeric column look ragged. */
+  .zp-num {
+    font-variant-numeric: tabular-nums;
+  }
+
+  .zp-shadow {
+    box-shadow: var(--zp-shadow);
+  }
+  .zp-shadow-pop {
+    box-shadow: var(--zp-shadow-pop);
+  }
+}
