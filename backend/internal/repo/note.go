@@ -100,6 +100,45 @@ func (Notes) ForDiagram(ctx context.Context, q store.Querier, d *diagram.Diagram
 	return out, rows.Err()
 }
 
+// ForEntities returns the open notes about any of these catalog entities,
+// each carrying its subject's slug.
+//
+// Deliberately not scoped to a diagram: a spec export bundles the entities a
+// work item references, and those may be drawn in four different pictures. The
+// question is "what is unresolved about these things", and which picture the
+// question was raised in is not part of it.
+func (Notes) ForEntities(ctx context.Context, q store.Querier, projectID uuid.UUID, entityIDs []uuid.UUID) ([]*diagram.Note, error) {
+	if len(entityIDs) == 0 {
+		return nil, nil
+	}
+	sql := `
+		SELECT ` + prefixed("n", noteColumns) + `, coalesce(e.slug, '')
+		  FROM notes n
+		  JOIN catalog_entities e ON e.id = n.subject_id AND e.deleted_at IS NULL
+		 WHERE n.project_id = $1
+		   AND n.deleted_at IS NULL
+		   AND n.status = 'open'
+		   AND n.subject_kind = 'catalog_entity'
+		   AND n.subject_id = ANY($2)
+		 ORDER BY e.slug, n.created_at`
+	rows, err := q.Query(ctx, sql, projectID, entityIDs)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var out []*diagram.Note
+	for rows.Next() {
+		n, slug, err := scanNoteWithSlug(rows)
+		if err != nil {
+			return nil, err
+		}
+		n.SubjectSlug = slug
+		out = append(out, n)
+	}
+	return out, rows.Err()
+}
+
 // SetStatus moves a note through its lifecycle.
 func (Notes) SetStatus(ctx context.Context, q store.Querier, id uuid.UUID, status diagram.NoteStatus) error {
 	const sql = `

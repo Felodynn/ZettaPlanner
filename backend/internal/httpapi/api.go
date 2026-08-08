@@ -23,6 +23,7 @@ import (
 	"github.com/Felodynn/ZettaPlanner/backend/internal/service/auth"
 	"github.com/Felodynn/ZettaPlanner/backend/internal/service/contextsvc"
 	diagramsvc "github.com/Felodynn/ZettaPlanner/backend/internal/service/diagram"
+	"github.com/Felodynn/ZettaPlanner/backend/internal/service/export"
 	"github.com/Felodynn/ZettaPlanner/backend/internal/service/governance"
 	ingestsvc "github.com/Felodynn/ZettaPlanner/backend/internal/service/ingest"
 	plansvc "github.com/Felodynn/ZettaPlanner/backend/internal/service/plan"
@@ -151,6 +152,7 @@ type Deps struct {
 	Context    *contextsvc.Service
 	Threads    *threadsvc.Service
 	Governance *governance.Service
+	Export     *export.Service
 
 	// Events is the SSE fan-out. Constructed by the caller because the agent
 	// runner and the thread service publish into it and are built before the
@@ -168,6 +170,10 @@ type Deps struct {
 	// written to the audit log. Off unless the deployment is actually behind a
 	// proxy: trusting it otherwise lets any caller choose what gets recorded.
 	TrustProxy bool
+
+	// DevOrigin is a single browser origin allowed to call this API with
+	// credentials. Empty in every deployment — see devCORSMiddleware.
+	DevOrigin string
 }
 
 // Server is a built API: an http.Handler plus the huma API the document is
@@ -233,6 +239,8 @@ func New(deps Deps) *Server {
 	}
 	if deps.Projects != nil {
 		s.registerProjects()
+		s.registerAudit()
+		s.registerOwnership()
 	}
 	if deps.Diagrams != nil {
 		s.registerDiagrams()
@@ -242,6 +250,7 @@ func New(deps Deps) *Server {
 	}
 	if deps.Plan != nil {
 		s.registerPlan()
+		s.registerDashboard()
 	}
 	if deps.Context != nil {
 		s.registerDigest()
@@ -256,6 +265,9 @@ func New(deps Deps) *Server {
 	if deps.Governance != nil {
 		s.registerProposals()
 	}
+	if deps.Export != nil {
+		s.registerExports()
+	}
 
 	// Middleware wraps the mux rather than the huma API so that it also covers
 	// the docs and openapi routes, and so the request id exists before huma
@@ -268,8 +280,44 @@ func New(deps Deps) *Server {
 	handler = envelopeMiddleware(handler)
 	handler = clientIPMiddleware(deps.TrustProxy, handler)
 	handler = loggingMiddleware(deps.Log, handler)
+	handler = devCORSMiddleware(deps.DevOrigin, handler)
 	s.Handler = requestIDMiddleware(handler)
 	return s
+}
+
+// devCORSMiddleware allows exactly one origin to call this API with cookies.
+//
+// **There is no CORS in a deployment.** The SPA is embedded in this binary
+// (D2), so the browser and the API share an origin and the question never
+// arises. This exists for the frontend dev server, which runs on its own port,
+// and it is off unless ZP_DEV_ORIGIN names a specific origin.
+//
+// One origin, echoed back exactly — never `*`, which browsers refuse to combine
+// with credentials anyway, and never a reflected Origin header, which is the
+// same thing as no policy at all. The `Vary` is not decoration: without it a
+// cache in front of this process can serve one origin's preflight answer to
+// another.
+func devCORSMiddleware(origin string, next http.Handler) http.Handler {
+	if origin == "" {
+		return next
+	}
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Add("Vary", "Origin")
+		if r.Header.Get("Origin") == origin {
+			h := w.Header()
+			h.Set("Access-Control-Allow-Origin", origin)
+			h.Set("Access-Control-Allow-Credentials", "true")
+			h.Set("Access-Control-Expose-Headers", "X-Request-Id, Content-Disposition")
+			if r.Method == http.MethodOptions {
+				h.Set("Access-Control-Allow-Methods", "GET, POST, PATCH, PUT, DELETE, OPTIONS")
+				h.Set("Access-Control-Allow-Headers", "Content-Type, Last-Event-ID")
+				h.Set("Access-Control-Max-Age", "600")
+				w.WriteHeader(http.StatusNoContent)
+				return
+			}
+		}
+		next.ServeHTTP(w, r)
+	})
 }
 
 // RegisterOperations exposes the registered paths, for tests that assert the

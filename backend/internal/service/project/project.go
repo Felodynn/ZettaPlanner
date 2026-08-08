@@ -30,6 +30,7 @@ type Service struct {
 	projects repo.Projects
 	members  repo.Members
 	users    repo.Users
+	logs     repo.AuditLogs
 }
 
 // New builds the service.

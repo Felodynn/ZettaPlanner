@@ -43,6 +43,8 @@ func run(ctx context.Context, args []string) error {
 		return cmdAdmin(ctx, args[1:])
 	case "context":
 		return cmdContext(ctx, args[1:])
+	case "git":
+		return cmdGit(ctx, args[1:])
 	case "trace":
 		return cmdTrace(ctx, args[1:])
 	case "help", "-h", "--help":
@@ -66,6 +68,9 @@ Usage:
   zettaplanner openapi               Emit the OpenAPI 3.1 document
   zettaplanner admin create-user     Create the first account (bootstrap)
   zettaplanner context show          Print exactly what a turn would receive
+  zettaplanner git enable|disable    Turn the one-way git projection on or off (--project X)
+  zettaplanner git resync           Rebuild a project's projected tree from the database
+  zettaplanner git status           Where the projection is and what it last committed
   zettaplanner trace <turn_id>       Replay one agent turn: every call, every retry
 
 Environment:
@@ -79,6 +84,9 @@ Environment:
   ZP_LEASE_TTL             Diagram edit-session lifetime (default 5m)
   ZP_SECURE_COOKIES        Mark the session cookie Secure. On for any TLS deployment.
   ZP_TRUST_PROXY           Trust X-Forwarded-For for the audited client address
+  ZP_GIT_DIR               Parent of the per-project git projections (default data/git)
+  ZP_GIT_POLL              How often the projection worker looks for work (default 60s)
+  ZP_DEV_ORIGIN            One browser origin allowed to call the API with cookies. Dev only.
   ZP_SKIP_MODEL_VALIDATION Skip the live model checks at boot. Never in a deployment.
 
 `)

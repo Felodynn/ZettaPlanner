@@ -75,6 +75,7 @@ type Service struct {
 	warnings   repo.Warnings
 	users      repo.Users
 	entities   repo.Entities
+	dashboards repo.Dashboards
 }
 
 // New builds the service. indexer may be nil.

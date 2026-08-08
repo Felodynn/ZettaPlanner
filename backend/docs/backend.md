@@ -77,17 +77,21 @@ internal/
   repo/                    one file per aggregate, SQL only
   policy/                  roles, field ownership, denial text
   service/                 orchestration; owns transactions
-    auth/ project/ diagram/ ingest/ plan/ contextsvc/ thread/ governance/ export/
-                           (thread/ owns conversations and the turn queue;
+    auth/ project/ diagram/ ingest/ plan/ contextsvc/ thread/ governance/
+    export/ gitexport/     (thread/ owns conversations and the turn queue;
                             governance/ decides and applies proposals and runs
                             re-evaluate. Every mutating method in plan/ has an
-                            `InTx` form so a proposal is one transaction)
+                            `InTx` form so a proposal is one transaction.
+                            export/ gathers a spec.md; gitexport/ builds the
+                            projected tree and polls — it is never called from
+                            a write path)
   agent/                   loop, tools, turn lease, limits, retry, trace
   contextbuild/            skeleton, expansion, spill, digest — pure, no I/O
+  spec/                    spec.md rendering — pure, no database and no clock
   vector/                  the similarity boundary (§6.4); no SQL
   llm/                     ollama client, registry, error normalisation
   serialize/               canonical YAML (§6.2). Imports no layout package
-  gitproj/                 optional one-way projection
+  gitproj/                 git plumbing: whole-tree writes, commits, identities
   httpapi/                 handlers, middleware, OpenAPI, SSE hub
   audit/                   append-only writer
   telemetry/               slog setup, request ids
@@ -398,6 +402,12 @@ if you were the model.
 | D57 | **A change's premise is the fields it would write, plus the target's existence — not everything its snapshot recorded.** Contract §5.1 amended | The propose tools capture a fixed snapshot — ref, title, status, priority, both dates — whatever the change is about. Comparing all of it is the contract's literal reading of "the target moved" and is safe on paper, but in a live project a developer ticking a status supersedes every pending proposal about that item, and a conflict that fires constantly is one people learn to click past. That costs more than the case it guards. The narrow rule still catches the case this exists for: a proposal that would set a due date, approved after somebody else moved that same due date, silently reverts their decision. Worth revisiting in dogfood (Q10) |
 | D58 | **Superseding commits; the conflict is returned after the transaction, not from inside it** | The first version returned the `ConflictError` from the transaction closure, which rolled back the very row recording the supersession — leaving the proposal pending and the reviewer asked the same stale question tomorrow. Found by the test that asserted the status afterwards, which is the only way this one gets found: the API response was correct and the database was not. Superseding is a **decision** and has to land like one |
 | D59 | **Re-evaluate restates its output shape in the prompt and retries once with the teaching error** | The fourth instance of D38's pattern, measured the same day: `gemma4:31b-cloud` was sent a `format` schema and answered *"The `token-store` is incorrectly typed as a `queue`; it should be a `datastore`."* — a correct observation in a shape nothing can apply. `format` is accepted and discarded for rented weights. Same fix as ingest, for the same reason: the prompt states the object, and the second attempt carries the parse failure back verbatim |
+| D60 | **An architecture slice is serialized as `entities:` and `relations:`, not as a diagram.** Contract §6.2 amended | §6.2's shape describes one picture. What a spec export carries is the entities a work item references, which may be drawn in four of them, plus the relations around them. Emitting that under `nodes:` and `edges:` tells the reader it is looking at a diagram and their first question is which one — so each relation names the diagram it was drawn in, and an entity that is only the far end of a relation is marked `referenced: false` rather than silently reading as scope. Every determinism rule is unchanged, and the same serializer produces both |
+| D61 | **`constraints` is derived from what is already recorded, not stored as a field** | The obvious reading of "spec.md bundles intent, acceptance criteria, constraints" is a fourth text box. A free-text constraints field fills up with things recorded elsewhere — the blocker, the date, the deviation — and then disagrees with them, and the disagreement is invisible because nothing compares the two. What actually bounds a work item is already in the plan, so the export reads it: blockers in both directions with their live status, its dates against its milestone's, its open deviations, unresolved notes on the architecture it touches, and which of that architecture a vision model read and nobody has confirmed. Every line traces to a row |
+| D62 | **The git projection polls; it is never called from a write path, and stores no state in Postgres** | Two obvious designs were rejected. A hook after the transaction that saved a diagram puts git in the blast radius of a write — the contract's "git failure never blocks or corrupts a DB write" then depends on error handling being right forever, rather than on there being no such path. And a `projected_revision` column is a second source of truth about a thing whose entire purpose is to be disposable: the moment it disagrees, the projection goes quiet with nothing to notice it. Instead the worker rebuilds the whole tree on a timer and `git diff --cached` decides whether to commit. The only state is a watermark inside `.git`, used to decide whose name a commit carries; losing it costs one rebuild that git declines to commit. The price is staleness of up to one interval, which is exactly what D10 says the projection is allowed to be |
+| D63 | **The project audit log is readable by any member, not only by managers.** Contract §7.1 amended | The same call §3.6 makes about the conversation, for the same reason. A record the people it describes cannot read is not a control — and the point of recording agent writes at all (D11) is that the person the agent acted for can see what it did. A role-gated log would mean a developer cannot check what an agent wrote on their behalf, which inverts the purpose. Membership is the boundary; role is not. A non-member gets `not_found`, like every other project-scoped read |
+| D64 | **A work item's spec carries the open deviations on the items blocking it.** Found by the manual run | The item export listed "blocked by ZP-1, in progress, due the 18th" and stopped there. The milestone export, which aggregates every item's deviations, said in the same breath that ZP-1 had already hit a problem its date does not reflect — so the two documents contradicted each other about the same week, and the one a reader is more likely to receive was the optimistic one. The reader has no access to this system and cannot go and look. Costs one query per unfinished blocker, which is a handful |
+| D65 | **The field ownership table is published, as a rendering hint that is explicitly not a control.** Contract §7.1 amended | Not asked for by the contract, and built because the alternative is worse. A frontend has to know which controls to disable and had two options: duplicate §4.2 in TypeScript, or ask. The duplicate drifts on the day somebody edits the table and not the UI — silently, in the direction of offering people controls that 403. The endpoint reads `policy.Rules`, the same function `CheckWrite` reads, so it cannot describe a rule the write path does not apply. It reports role-level ownership only: the `assigned`, `author` and `reporter` scopes depend on the specific row, which is the frontend's half, and every write is re-checked regardless (D7). Documented at both ends as a hint — a disabled button that is the only thing between a developer and a manager-owned field is not a permission system, and the same endpoint is called by agents that never saw the UI |
 | Q3 | **Answered: per-page wins, and not narrowly** | Same schema, same rules, same model, same three pages. Per-page: 7 nodes, 7 edges, correct kinds, both dangling arrows flagged. Whole-document, three trials: **0 nodes every time**, 7 edges every time, and an invented `unknown_destination` endpoint. The failure is not "worse cross-page linking" as assumed — the model stops emitting the first array altogether once the input is multi-image, so there is nothing for the edges to attach to. Whole-document is cheaper in input tokens (1,605 against 3,840, since the images share one prompt) and the output is unusable. Latency on the real cloud model was 7–10s per page. The one thing per-page genuinely loses is that whole-document *did* join `auth_service → token_store` across the page break; per-page could not, and correctly recorded it as unresolved rather than guessing |
 | Q6 | **Lease TTL 5 minutes, heartbeat 60 seconds** — answered, and due to be revisited in dogfood | Long enough to survive a screen lock, a network blip, or a lid closed while somebody answers the door; short enough that a browser killed mid-edit does not hold a diagram for an afternoon. A sleeping laptop loses its lease, which is the correct outcome — the alternative is a diagram nobody can touch because of a machine that is not coming back. The TTL is published in the acquire response so the frontend does not hard-code a number that later disagrees with the server |
 
@@ -871,21 +881,89 @@ POST /api/v1/work-items/{id}/spec-export > spec.md
 zettaplanner git enable --project X && zettaplanner git resync --project X
 git -C data/git/X log --oneline && git -C data/git/X show HEAD
 # delete the git dir entirely, resync, confirm identical tree
+git -C data/git/X rev-parse 'HEAD^{tree}'    # before and after must match
+
+# break the projection on purpose, then write. The write must land.
+rm -rf data/git/X && echo not-a-dir > data/git/X
+POST /api/v1/diagrams/{id}/revisions          # expect 201, and one ERROR line
+
+GET /api/v1/projects/{pid}/audit?subject=work_item&subject_id=...
+GET /api/v1/projects/{pid}/dashboard
+psql zettaplanner -v pid="'<uuid>'" -f docs/export-rehearsal.sql
 ```
 
 **Exit criteria:**
-- [ ] `spec.md` contains intent, criteria, constraints, and the entity YAML slice
-- [ ] A spec exported for a real item is decomposable by a reader with no other
+- [x] `spec.md` contains intent, criteria, constraints, and the entity YAML slice
+- [x] A spec exported for a real item is decomposable by a reader with no other
       context
-- [ ] Git projection regenerable from scratch to a byte-identical tree
-- [ ] Git failure never blocks or corrupts a DB write
-- [ ] Audit query reconstructs who changed what, including every agent write
-- [ ] **Export readiness rehearsal:** using SQL only, produce (a) every status
+- [x] Git projection regenerable from scratch to a byte-identical tree
+- [x] Git failure never blocks or corrupts a DB write
+- [x] Audit query reconstructs who changed what, including every agent write
+- [x] **Export readiness rehearsal:** using SQL only, produce (a) every status
       transition on a project with its duration, (b) all worklogs and deviations
       with actor and timestamp, (c) agent turns with tokens and error class.
       Nothing here ships a CSV — the point is to find the gap now, while the
       product is still cheap to change, rather than in v0.1 when the missing
       months cannot be recovered
+
+**Notes on what was built:**
+
+- **`constraints` is not a stored field, and inventing one would have been the
+  wrong answer.** A free-text box labelled constraints fills up with things
+  already recorded elsewhere and then disagrees with them. What actually bounds
+  a work item *is* recorded — its blockers in both directions, its dates against
+  its milestone's, the deviations open against it, and how much of the
+  architecture it touches nobody has checked — so the export reads those and
+  says them in sentences (D61).
+- **The projection has no hook in any write path.** A worker polls, builds the
+  whole tree, and commits if it differs. "Git failure never blocks a DB write"
+  is then structural rather than a promise about error handling: there is no
+  code path where a write waits on git. Verified by breaking the projection
+  directory mid-run — the save returned 201, the revision landed, and the log
+  carried one error line (D62).
+- **Nothing about the projection is stored in Postgres.** `git diff --cached` is
+  the authority on whether the tree is current. The only local state is a
+  watermark inside `.git`, used to decide whose name a commit carries; losing it
+  costs one rebuild that git then declines to commit.
+- **The published ownership table (D65) is the one piece of Phase 8 the contract
+  did not ask for**, and it exists because the alternative is worse: a frontend
+  needs to know which controls to disable, and its two options were to duplicate
+  §4.2 in TypeScript or to ask. The duplicate drifts on the day somebody edits
+  the table and not the UI, silently, in the direction of showing people
+  controls that 403. The endpoint reads the same function `CheckWrite` reads, so
+  it cannot describe a rule that is not enforced — and it is a hint, never a
+  control.
+- Measured on the manual run: enabling the projection produced a 15-file tree;
+  deleting the directory entirely and resyncing produced the **same tree hash**
+  (`324e7f7d…`) under a different commit. A later hand edit — the token store
+  reclassified from `datastore` to `queue` — arrived as a four-line diff in
+  `entities/token-store.yaml` including `provenance: human_created →
+  human_edited`, plus a new file for the edge that appeared. That is the diff
+  ergonomics D10 was bought for, and it is the whole return on it.
+- The rehearsal found one real gap; see below. Queries live in
+  `docs/export-rehearsal.sql` and nothing ships.
+
+**What the export rehearsal found:**
+
+All three questions are answerable in SQL over the existing record, with
+durations derived by window function and never stored (§6.5 constraint 4). Query
+(d) — coverage per action — turned out to be the most useful of the four and is
+the one to run first: an action with zero rows in a project where it obviously
+happened is a write path that is not recording.
+
+The gap: **(a) and (a2) measure only closed intervals.** A state is timed by the
+transition that leaves it, so an item that has never moved appears in neither —
+and "ZP-4 has been blocked since the day it was created and nobody has touched
+it" is exactly what a retrospective is looking for. Added as (a3): entry into the
+current state is `max(at)` over its transitions, or the row's creation when there
+are none, against `now()`. Nothing needs storing to make that work, but it does
+mean **the v0.1 export cannot be transitions alone** — it needs the current row
+beside them, or the longest-running problems are the ones it omits. Recorded
+against Q7.
+
+Measured on one real `glm-5.2:cloud` turn: 5 model calls, 28,435 in / 3,919 out,
+59.2s, no error class, 2 proposals raised — every column §4 asks to track is
+populated by the harness without further work.
 
 ---
 
@@ -930,7 +1008,7 @@ harness and got lucky*.
 | Q4 | Is one retry enough for `tool_parse`, or does it need two with backoff? | Phase 6, from error-class data |
 | Q5 | Should item-scoped threads have their own context skeleton, or share the project one? | Phase 6 |
 | Q6 | Lease TTL and heartbeat interval that survive a laptop sleeping | Phase 2, then revisit in dogfood |
-| Q7 | What shape the v0.1 audit export takes — one flat CSV or several (transitions, worklogs, turns, raw events) | v0.1, from the Phase 8 rehearsal and real dogfood data. Deliberately not decided now |
+| Q7 | What shape the v0.1 audit export takes — one flat CSV or several (transitions, worklogs, turns, raw events) | v0.1, from the Phase 8 rehearsal and real dogfood data. Deliberately not decided now. **The rehearsal settled one part of it:** transitions alone are not enough. A state is timed by the transition that leaves it, so an item that has never moved appears in no transition query at all — and "blocked since the day it was created" is exactly what the export is for. Whatever shape it takes has to carry the current row beside the log |
 | Q8 | **Should a subtask's own assignee be able to write it?** Today they cannot: §4.2 scopes SubTask and ChecklistItem to the assignee of the *parent item* ("within own item"), so handing somebody a subtask without reassigning the item leaves them unable to tick it. Implemented as the table says rather than widened silently | Dogfood (Phase 9), alongside D25. Both are the same shape of question — a rule that reads correctly in the table and may be wrong in a real week |
 | Q9 | **Does expansion need to match slug components, not just whole slugs?** The manual test's own question — "why is auth blocked?" — resolved to nothing, because the entity is `auth-service` and "auth" is not it. The skeleton still answered it, and `--item` covers the gap, but a natural question got no expansion. Matching hyphen-separated components would fix it and would also match "store" against `token-store` | Dogfood (Phase 9), from how people actually phrase things. Over-inclusion is visible in one line of `context show`; a silent miss is not visible at all, which argues for the looser rule — but not before there is real phrasing to look at |
 | Q10 | **Is the narrow reading of "the target moved" right?** (D57) A change's premise is the fields it would write plus the target's existence, so an edit elsewhere on the same item does not supersede. The broad reading is safer on paper — a proposal whose *rationale* cited a status that has since changed is arguably stale — and noisier in practice | Dogfood (Phase 9). The measurement is how often a superseded proposal turns out to have been fine, against how often an applied one turns out to have reverted something. A middle answer exists: have the propose tools record what the change is actually about rather than a fixed snapshot |

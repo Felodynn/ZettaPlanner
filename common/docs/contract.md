@@ -3,7 +3,9 @@
 **Status:** Draft v1
 **Owner:** Solo technical founder (Felodynn)
 **Audience:** the backend agent AND the frontend agent, equally
-**Companion documents:** `BACKEND.md`, `FRONTEND.md`
+**Companion documents:** `BACKEND.md`, `FRONTEND.md`, `frontend-notes.md`
+(what the backend learned that the frontend has to honour — implications, not
+rules)
 
 ---
 
@@ -958,6 +960,16 @@ projection (D10). Same bytes.
 - **One file per node, one per edge** in the git projection, keyed by
   `(from, to, relation)`. A single big document makes every diff useless.
 
+**A slice is not a diagram, and is not serialized as one.** The shape below
+describes one picture. A spec export (§7.1) carries the entities a work item
+references, which may be drawn in four of them, so it uses `entities:` and
+`relations:` instead — each relation naming the diagram it was drawn in, and
+each entity marked `referenced: false` when it is only the far end of a relation
+rather than something the item points at. Emitting that under `nodes:` and
+`edges:` would tell the reader it is looking at a diagram, and their first
+question would be which one. Every determinism rule above applies unchanged
+(D60).
+
 Shape:
 
 ```yaml
@@ -985,6 +997,49 @@ notes:
       May be the same store as "session-db" in the container diagram.
       Unresolved.
 ```
+
+#### 6.2a The git projection (D10)
+
+Off by default, per project, and turned on by an operator command rather than an
+API route — enabling it decides that a directory on the server's disk gets
+written to, which is a deployment decision.
+
+```
+README.md                                            what this is, and that it is one-way
+project.yaml                                         the project and its diagrams
+entities/<entity-slug>.yaml                          one file per catalog entity
+diagrams/<diagram-slug>/diagram.yaml                 what the picture is
+diagrams/<diagram-slug>/nodes/<entity-slug>.yaml     one file per placement
+diagrams/<diagram-slug>/edges/<from>__<relation>__<to>.yaml
+```
+
+Four properties, each load-bearing:
+
+- **Whole-tree, never incremental.** Every sync writes the complete file set
+  with everything else removed first. An additive projection keeps a file for
+  everything anybody ever deleted, and the tree drifts from the database while
+  every diff still looks clean.
+- **No hook in any write path.** A worker polls, builds the tree, and commits if
+  it differs. "Git failure never blocks or corrupts a DB write" is therefore
+  structural rather than a promise about error handling: no write is ever
+  waiting on git. The price is staleness of up to one poll interval, which is
+  what D10 says the projection is allowed to be.
+- **No projection state in the database.** No `projected_revision` column, no
+  projections table. `git diff --cached` is the authority on whether the tree
+  matches, and a stored marker would be a second source of truth about a thing
+  whose entire purpose is to be disposable (D62).
+- **Human and agent commits use distinct git identities.** `git log --author` is
+  the cheapest possible answer to "what did the model change", and it only works
+  if the two were never merged into one signature. A commit covering more than
+  one actor is attributed to the harness rather than to whoever was last.
+
+Deleting the directory and re-running the sync produces a **byte-identical
+tree**. Different commit hashes, because a commit carries a time and an author;
+the content is the tree, and it is the tree that has to match.
+
+The projection refuses a directory it did not create — it deletes everything
+outside `.git`, and the path comes from configuration, so one wrong setting is
+somebody's source tree.
 
 ### 6.3 Context assembly
 
@@ -1157,10 +1212,12 @@ GET    /api/v1/projects/{pid}/notes             ?status=
 PATCH  /api/v1/notes/{id}
 
 GET    /api/v1/projects/{pid}/digest
+GET    /api/v1/projects/{pid}/dashboard         ?horizon_days= → computed rollup
+GET    /api/v1/projects/{pid}/field-ownership   → §4.2 as this caller sees it
 POST   /api/v1/work-items/{id}/spec-export      → spec.md (manual only)
 POST   /api/v1/milestones/{id}/spec-export
 
-GET    /api/v1/projects/{pid}/audit             ?subject=&actor=&since=
+GET    /api/v1/projects/{pid}/audit             ?subject=&subject_id=&actor=&action=&since=&until=
 GET    /api/v1/admin/models                     (admin) → registry + live status
 GET    /api/v1/admin/users                      (admin)
 POST   /api/v1/admin/users                      (admin)
@@ -1174,6 +1231,28 @@ writes a `*.deleted` audit entry. **There is deliberately no route to edit or
 delete a worklog.** A worklog is corrected by adding another, which is what
 makes the log evidence rather than a current-state field — and what makes "what
 did we believe on the 12th" answerable at all.
+
+**`spec-export` is a POST because it writes.** The document is a read of the
+plan, but taking it outside is an event: `spec.exported` records who and when,
+and that is the question asked about a handoff that went wrong. It returns
+`text/markdown` with a filename, not a JSON envelope — the reader has no access
+to this system and should not have to unwrap anything first. There is no
+trigger and nothing reads a spec back in (§10, D64).
+
+**`dashboard` and `field-ownership` are computed on read and store nothing.**
+The dashboard is one call rather than six because a view assembled from six
+calls renders six moments, and the one that matters — is anything overdue —
+arrives last. `field-ownership` publishes the table §4.2 is enforced from, so a
+frontend can disable a control without keeping a second copy of the rule; it is
+a **hint for rendering and never a control**, because the `assigned`, `author`
+and `reporter` scopes depend on the specific row and every write is checked
+again on the server (D7, D65).
+
+**`audit` is readable by any member of the project, not only by managers** — the
+same call §3.6 makes about the conversation. A record the people it describes
+cannot read is not a control, and the point of recording agent writes is that
+the person the agent acted for can see what it did (D11). Membership is the
+boundary; role is not (D63).
 
 **The first account is created out of band.** `zettaplanner admin create-user`
 bootstraps it and refuses the moment any account exists, because without an

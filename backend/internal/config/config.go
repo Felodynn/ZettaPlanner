@@ -57,6 +57,27 @@ type Config struct {
 	// SkipModelValidation bypasses the live model checks at boot. It exists
 	// for migrations and offline tooling, never for `serve`.
 	SkipModelValidation bool
+
+	// GitDir is the parent directory of the one-way git projections, one
+	// repository per project (D10). Off unless a project turns it on; the
+	// directory is disposable and regenerable from the database.
+	GitDir string
+
+	// GitPoll is how often the projection worker looks for something to
+	// project. A poll rather than a hook: the projection must never sit inside
+	// the transaction of a write, so the price of that is being up to one
+	// interval stale, which is what D10 says it is allowed to be.
+	GitPoll time.Duration
+
+	// DevOrigin allows one browser origin to call this API cross-site with
+	// credentials, for a frontend dev server.
+	//
+	// Empty in every deployment: the SPA is served by this binary (D2), so the
+	// production answer is same-origin and no CORS at all. It exists because a
+	// Vite dev server on :5173 cannot hold a SameSite=Lax session cookie
+	// otherwise, and the alternative — developing against a proxy that hides
+	// the cookie rules — means discovering them in production.
+	DevOrigin string
 }
 
 // Load reads configuration from the environment, applying defaults.
@@ -76,6 +97,8 @@ func Load() (*Config, error) {
 		SkipModelValidation: envBool("ZP_SKIP_MODEL_VALIDATION", false),
 		SecureCookies:       envBool("ZP_SECURE_COOKIES", false),
 		TrustProxy:          envBool("ZP_TRUST_PROXY", false),
+		GitDir:              env("ZP_GIT_DIR", "data/git"),
+		DevOrigin:           strings.TrimRight(env("ZP_DEV_ORIGIN", ""), "/"),
 	}
 
 	ttl, err := time.ParseDuration(env("ZP_SESSION_TTL", "336h"))
@@ -90,11 +113,20 @@ func Load() (*Config, error) {
 	}
 	c.LeaseTTL = leaseTTL
 
+	gitPoll, err := time.ParseDuration(env("ZP_GIT_POLL", "60s"))
+	if err != nil {
+		return nil, fmt.Errorf("ZP_GIT_POLL is not a duration (try \"60s\"): %w", err)
+	}
+	c.GitPoll = gitPoll
+
 	if c.DatabaseURL == "" {
 		return nil, fmt.Errorf("ZP_DATABASE_URL is empty; set it to something like postgres:///zettaplanner or postgres://user:pass@host:5432/zettaplanner")
 	}
 	if abs, err := filepath.Abs(c.UploadsDir); err == nil {
 		c.UploadsDir = abs
+	}
+	if abs, err := filepath.Abs(c.GitDir); err == nil {
+		c.GitDir = abs
 	}
 	return c, nil
 }

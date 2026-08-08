@@ -20,6 +20,8 @@ import (
 	"github.com/Felodynn/ZettaPlanner/backend/internal/service/auth"
 	"github.com/Felodynn/ZettaPlanner/backend/internal/service/contextsvc"
 	diagramsvc "github.com/Felodynn/ZettaPlanner/backend/internal/service/diagram"
+	"github.com/Felodynn/ZettaPlanner/backend/internal/service/export"
+	"github.com/Felodynn/ZettaPlanner/backend/internal/service/gitexport"
 	"github.com/Felodynn/ZettaPlanner/backend/internal/service/governance"
 	ingestsvc "github.com/Felodynn/ZettaPlanner/backend/internal/service/ingest"
 	plansvc "github.com/Felodynn/ZettaPlanner/backend/internal/service/plan"
@@ -103,6 +105,14 @@ func cmdServe(ctx context.Context, args []string) error {
 	})
 	threadSvc := threadsvc.New(db, log, runner, events)
 	governanceSvc := governance.New(db, log, planSvc, diagramSvc, events, registry)
+	exportSvc := export.New(db, log)
+
+	// The projection worker never sits in a write path: it polls, builds the
+	// whole tree, and commits if it differs. A git failure therefore cannot
+	// block or corrupt a database write, because no write is ever waiting on it
+	// (D10, D62).
+	gitSvc := gitexport.New(db, log, cfg.GitDir, cfg.GitPoll)
+	gitSvc.Start(requestCtx)
 
 	// A turn left running by a killed process blocks its project's queue until
 	// the lease would lapse, and after a restart nothing is going to heartbeat
@@ -132,11 +142,13 @@ func cmdServe(ctx context.Context, args []string) error {
 		Context:       contextSvc,
 		Threads:       threadSvc,
 		Governance:    governanceSvc,
+		Export:        exportSvc,
 		Events:        events,
 		Log:           log,
 		Started:       time.Now(),
 		SecureCookies: cfg.SecureCookies,
 		TrustProxy:    cfg.TrustProxy,
+		DevOrigin:     cfg.DevOrigin,
 	})
 	httpSrv := &http.Server{
 		Addr:              cfg.Addr,
@@ -178,6 +190,10 @@ func cmdServe(ctx context.Context, args []string) error {
 		// claimed and an ingest stuck in `extracting` for the recovery sweep to
 		// find on the next boot.
 		ingestSvc.Wait()
+		// Waited on rather than cancelled: a sync cut between clearing the
+		// working tree and committing leaves a directory that looks like a
+		// projection of nothing.
+		gitSvc.Stop()
 		return nil
 	}
 }
