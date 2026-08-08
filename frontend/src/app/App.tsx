@@ -14,6 +14,8 @@ import { ThreadPage } from '@/features/chat/ThreadPage'
 import { PlanPage } from '@/features/plan/PlanPage'
 import { ItemDetail } from '@/features/plan/ItemDetail'
 import { MyTasks } from '@/features/plan/MyTasks'
+import { DiagramList } from '@/features/diagram/DiagramList'
+import { DiagramPage } from '@/features/diagram/DiagramPage'
 
 /**
  * Refuses a project route to a non-member.
@@ -74,7 +76,8 @@ function AuthedApp() {
           <Route path="plan" element={<PlanPage />} />
           <Route path="plan/:itemId" element={<ItemDetail />} />
           <Route path="mine" element={<MyTasks />} />
-          <Route path="diagrams/*" element={<Placeholder phase="F3" what="Diagrams" />} />
+          <Route path="diagrams" element={<DiagramList />} />
+          <Route path="diagrams/:diagramId" element={<DiagramPage />} />
           <Route path="ingest/*" element={<Placeholder phase="F5" what="Ingest review" />} />
           <Route path="proposals/*" element={<Placeholder phase="F6" what="Proposals" />} />
           <Route path="notes" element={<Placeholder phase="F2" what="Notes" />} />
