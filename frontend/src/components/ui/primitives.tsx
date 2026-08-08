@@ -64,7 +64,10 @@ export const Textarea = forwardRef<HTMLTextAreaElement, TextareaHTMLAttributes<H
 
 export const Select = forwardRef<HTMLSelectElement, SelectHTMLAttributes<HTMLSelectElement>>(
   function Select({ className, ...rest }, ref) {
-    return <select ref={ref} className={cn(FIELD, 'h-8 pr-7', className)} {...rest} />
+    // No vertical padding: a native select centres its own text against the
+    // element height, and adding padding on top of that clips the descenders
+    // at the small sizes this UI uses.
+    return <select ref={ref} className={cn(FIELD, 'h-8 py-0 pr-7', className)} {...rest} />
   },
 )
 

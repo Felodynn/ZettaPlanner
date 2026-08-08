@@ -11,6 +11,9 @@ import { ProjectEventsProvider } from '@/events/ProjectEvents'
 import { ProjectPicker } from '@/features/project/ProjectPicker'
 import { ProjectOverview } from '@/features/project/ProjectOverview'
 import { ThreadPage } from '@/features/chat/ThreadPage'
+import { PlanPage } from '@/features/plan/PlanPage'
+import { ItemDetail } from '@/features/plan/ItemDetail'
+import { MyTasks } from '@/features/plan/MyTasks'
 
 /**
  * Refuses a project route to a non-member.
@@ -68,8 +71,9 @@ function AuthedApp() {
         <Route path="/p/:projectId" element={<ProjectRoutes />}>
           <Route index element={<ProjectOverview />} />
           <Route path="thread" element={<ThreadPage />} />
-          <Route path="plan/*" element={<Placeholder phase="F2" what="Plan views" />} />
-          <Route path="mine" element={<Placeholder phase="F2" what="My tasks" />} />
+          <Route path="plan" element={<PlanPage />} />
+          <Route path="plan/:itemId" element={<ItemDetail />} />
+          <Route path="mine" element={<MyTasks />} />
           <Route path="diagrams/*" element={<Placeholder phase="F3" what="Diagrams" />} />
           <Route path="ingest/*" element={<Placeholder phase="F5" what="Ingest review" />} />
           <Route path="proposals/*" element={<Placeholder phase="F6" what="Proposals" />} />

@@ -14,7 +14,8 @@
     "check:turn": "node scripts/check-turn.mjs",
     "check:queue": "node scripts/check-queue.mjs",
     "check:reconnect": "ZP_RESTART=./scripts/restart-backend.sh node scripts/check-reconnect.mjs",
-    "check:longthread": "node scripts/check-longthread.mjs"
+    "check:longthread": "node scripts/check-longthread.mjs",
+    "check:ownership": "node scripts/check-ownership.mjs"
   },
   "dependencies": {
     "@dagrejs/dagre": "^1.1.4",
