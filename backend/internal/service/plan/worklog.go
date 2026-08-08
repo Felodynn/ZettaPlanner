@@ -60,6 +60,14 @@ func (s *Service) AddWorklog(ctx context.Context, itemID *uuid.UUID, projectID u
 		if err := s.worklogs.Create(ctx, tx, w); err != nil {
 			return err
 		}
+		// Indexed in the same transaction as the row (§6.3). A worklog that
+		// committed but did not index is invisible to retrieval, and nothing
+		// downstream can tell that state from "there was nothing relevant".
+		if s.indexer != nil {
+			if err := s.indexer.IndexWorklog(ctx, tx, w); err != nil {
+				return err
+			}
+		}
 
 		created = w
 		return audit.Write(ctx, tx, audit.Entry{

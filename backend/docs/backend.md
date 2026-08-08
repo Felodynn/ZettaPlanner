@@ -77,10 +77,11 @@ internal/
   repo/                    one file per aggregate, SQL only
   policy/                  roles, field ownership, denial text
   service/                 orchestration; owns transactions
-    auth/ project/ diagram/ ingest/ plan/ thread/ proposal/ export/
+    auth/ project/ diagram/ ingest/ plan/ contextsvc/ thread/ proposal/ export/
   agent/                   loop, tools, turn lease, streaming
     tools/                 one file per tool
-  contextbuild/            skeleton, expansion, spill, digest
+  contextbuild/            skeleton, expansion, spill, digest — pure, no I/O
+  vector/                  the similarity boundary (§6.4); no SQL
   llm/                     ollama client, registry, error normalisation
   serialize/               canonical YAML (§6.2). Imports no layout package
   gitproj/                 optional one-way projection
@@ -94,6 +95,11 @@ web/                       React app (FRONTEND.md); built and embedded
 `internal/contextbuild` must not import any package that reads
 `diagram_layout`. This is how D5 stops being a good intention. Write the import
 test in Phase 2 and never delete it.
+
+Phase 5 went further with `contextbuild` and gave it **no I/O at all** (D46):
+no database handle, no HTTP client, no clock it did not receive. A coordinate
+cannot reach a prompt from a package that has no query to reach it with, and
+every rule it enforces is then testable with no infrastructure.
 
 ### 1.2 Conventions
 
@@ -375,6 +381,10 @@ if you were the model.
 | D43 | **Work item refs come from `projects.ref_seq`, a monotonic counter read with `UPDATE ... RETURNING`** (migration 0005, contract §6.1 amended) | 0001 already refuses to make the ref index partial so that `ZP-14` is never reissued after `ZP-14` is dropped. `max(ref)+1` would satisfy that only by parsing an integer out of text, and would race between two concurrent creates. The counter is exact, and the row lock the UPDATE takes serialises the creates for free — no advisory lock, no retry loop |
 | D44 | **The plan's four status vocabularies are closed in the schema** (`milestones.status`, `sub_tasks.status`, `work_items.priority`; migration 0005). Work items and subtasks **share** one set; milestones get a coarser one; an unset priority is not `normal` | 0001 left these as bare TEXT because the contract's schema block does, and every other status column in the database carries its set. A typo'd status is not a validation failure, it is a work item no query ever finds again. Sharing the set between items and subtasks is one thing to teach the planner rather than two, and makes the time-in-status query identical at both levels. Milestones are coarser on purpose: a milestone is not `blocked` or `review` — those are facts about the items inside it, and offering them invites a status that contradicts its own contents |
 | D45 | **A patch that changes only a transition writes only the transition entry** | The obvious implementation writes `*.updated` alongside every `*.status_changed`, and its before and after are then identical. That is worse than no row: it records an edit that never happened, and the export cannot tell it from one that did. So each fact is written only when it moved — up to four entries from one PATCH (status, assignee, milestone, everything else), grouped by the shared `request_id` |
+| D46 | **`internal/contextbuild` does no I/O whatsoever.** The gathering lives in `internal/service/contextsvc`; the assembler is given rows | §1.1's structural rule says the packages producing model context must not import anything that reads `diagram_layout`, and the test states that as "must not import internal/repo". Building the assembler *under* that rule rather than beside it turns out to be stronger and simpler: it has no database handle, so there is no query from it to reach a coordinate with, and every rule it enforces — the budget ladder, the never-dropped sections, the rendering — is testable with no infrastructure at all. The cost is a service that is mostly plumbing, which is the correct place for plumbing |
+| D47 | **Spill is embedded inside the transaction that wrote the source row. A configured-and-failing embedder fails the write** | §6.3 says embed on write, in the same transaction. The reason is that the alternative — commit now, index shortly — produces a worklog that exists and is invisible to retrieval, and *nothing downstream can distinguish that state from "there was nothing relevant"*. A backfill job would be a second source of truth about what has been indexed. The uncomfortable half is stated rather than hidden: a worklog write now depends on the embedding model answering. **Not configured** and **configured and broken** are deliberately different — with no embedder the write succeeds and the assembled context says layer 3 is unavailable; with a broken one the write fails and says why. Worth revisiting in dogfood: if a local Ollama hiccup blocks note-taking often enough to change behaviour, the tradeoff is wrong |
+| D48 | **Digest model-field staleness is derived from the project's `audit_log` count, not set by a flag** | `model_fields_stale` as a flag is correct until the fourteenth write path forgets to set it, and the failure is invisible — a stale hypothesis presented as current. The log is append-only and nothing is ever deleted from it (§6.5), so its count for a project only rises: recording the mark when the model wrote makes "has the graph moved since" a comparison. Stale means dated, not wrong, so the fields are kept — the `dead_ends` are the most valuable thing in them. And a project where no model has written yet is **not** stale: a staleness badge over an empty panel teaches people to ignore the badge |
+| D49 | **A similarity search across two embedding models is an error, never a filter** | Filtering to the rows that happen to match would answer a question about ten thousand chunks using the eleven in the right space, and report success — and the answers would be plausible, which is what makes it the worst available behaviour. `chunks.model` is per row precisely so a half-migrated corpus is detectable; the refusal names both models and says to re-embed |
 | Q3 | **Answered: per-page wins, and not narrowly** | Same schema, same rules, same model, same three pages. Per-page: 7 nodes, 7 edges, correct kinds, both dangling arrows flagged. Whole-document, three trials: **0 nodes every time**, 7 edges every time, and an invented `unknown_destination` endpoint. The failure is not "worse cross-page linking" as assumed — the model stops emitting the first array altogether once the input is multi-image, so there is nothing for the edges to attach to. Whole-document is cheaper in input tokens (1,605 against 3,840, since the images share one prompt) and the output is unusable. Latency on the real cloud model was 7–10s per page. The one thing per-page genuinely loses is that whole-document *did* join `auth_service → token_store` across the page break; per-page could not, and correctly recorded it as unresolved rather than guessing |
 | Q6 | **Lease TTL 5 minutes, heartbeat 60 seconds** — answered, and due to be revisited in dogfood | Long enough to survive a screen lock, a network blip, or a lid closed while somebody answers the door; short enough that a browser killed mid-edit does not hold a diagram for an afternoon. A sleeping laptop loses its lease, which is the correct outcome — the alternative is a diagram nobody can touch because of a machine that is not coming back. The TTL is published in the acquire response so the frontend does not hard-code a number that later disagrees with the server |
 
@@ -601,15 +611,47 @@ Read it as if you were the model. Is anything essential missing? Is anything
 present that would mislead? Is a coordinate visible anywhere?
 
 **Exit criteria:**
-- [ ] Skeleton includes open items, deviations, notes, recent decisions, and
+- [x] Skeleton includes open items, deviations, notes, recent decisions, and
       rejected proposals with rationales
-- [ ] Expansion answers dependency and architecture questions by traversal, with
+- [x] Expansion answers dependency and architecture questions by traversal, with
       no vector search involved
-- [ ] Spill only is chunked; embedding model recorded; mismatch errors
-- [ ] Digest harness fields recomputed and provably drift-free; model fields
+- [x] Spill only is chunked; embedding model recorded; mismatch errors
+- [x] Digest harness fields recomputed and provably drift-free; model fields
       marked stale on graph change
-- [ ] Assembly stays under budget and names what it dropped
-- [ ] No layout data reachable from `contextbuild` (import test)
+- [x] Assembly stays under budget and names what it dropped
+- [x] No layout data reachable from `contextbuild` (import test)
+
+**Notes on what was built:**
+
+- **`internal/contextbuild` does no I/O at all** (D46). Not "does not import the
+  repo" — no database handle, no HTTP client, no clock it did not receive. That
+  is a stronger form of the D5 rule than the import test can state: a coordinate
+  cannot reach a prompt from there because there is no query from there to reach
+  it with. `internal/service/contextsvc` does every query and hands rows in.
+- **Everything is read in one transaction.** Layers gathered across several
+  snapshots can disagree — a skeleton listing an item as open beside an
+  expansion showing it done — and a model handed a contradiction resolves it
+  silently and confidently.
+- **Reference resolution is deterministic and closed.** Expansion starts from
+  `KEY-\d+` matched against the project's key and from entity slugs and display
+  names that actually exist; it finds nothing else, and never asks a model which
+  items a sentence is about. `context show` prints what it resolved to, because
+  "the context is about the wrong item" is a failure that looks exactly like
+  "the model is bad at this".
+- **Staleness is derived rather than flagged** (D48), from the project's
+  `audit_log` count. The log is append-only, so the count only rises and "has
+  the graph moved" is a comparison — no write path has to remember anything.
+- The **token count is an estimate and says so everywhere it is printed.** A
+  real count needs the target model's tokenizer, which costs a round trip per
+  assembly and, on a cloud model, tokens. The estimate runs deliberately high:
+  an underestimate overflows at the model rather than at the budget check.
+- Read as the model on a real project: the assembled context answered *"why is
+  auth blocked?"* from the skeleton alone — the item, its deviation, and two
+  rejected proposals that between them rule out Redis and a TTL column. Adding
+  `--item ZP-1` brought the dependency chain, the subtasks and the
+  architecture slice; the top retrieval hit was the exact paragraph weighing the
+  sweeper against a check-on-read. Nothing present was misleading, and no
+  coordinate appeared with real ones in `diagram_layout`.
 
 ---
 
@@ -817,3 +859,4 @@ harness and got lucky*.
 | Q6 | Lease TTL and heartbeat interval that survive a laptop sleeping | Phase 2, then revisit in dogfood |
 | Q7 | What shape the v0.1 audit export takes — one flat CSV or several (transitions, worklogs, turns, raw events) | v0.1, from the Phase 8 rehearsal and real dogfood data. Deliberately not decided now |
 | Q8 | **Should a subtask's own assignee be able to write it?** Today they cannot: §4.2 scopes SubTask and ChecklistItem to the assignee of the *parent item* ("within own item"), so handing somebody a subtask without reassigning the item leaves them unable to tick it. Implemented as the table says rather than widened silently | Dogfood (Phase 9), alongside D25. Both are the same shape of question — a rule that reads correctly in the table and may be wrong in a real week |
+| Q9 | **Does expansion need to match slug components, not just whole slugs?** The manual test's own question — "why is auth blocked?" — resolved to nothing, because the entity is `auth-service` and "auth" is not it. The skeleton still answered it, and `--item` covers the gap, but a natural question got no expansion. Matching hyphen-separated components would fix it and would also match "store" against `token-store` | Dogfood (Phase 9), from how people actually phrase things. Over-inclusion is visible in one line of `context show`; a silent miss is not visible at all, which argues for the looser rule — but not before there is real phrasing to look at |

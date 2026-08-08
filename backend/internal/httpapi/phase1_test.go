@@ -15,6 +15,7 @@ import (
 	"github.com/Felodynn/ZettaPlanner/backend/internal/httpapi"
 	"github.com/Felodynn/ZettaPlanner/backend/internal/policy"
 	"github.com/Felodynn/ZettaPlanner/backend/internal/service/auth"
+	"github.com/Felodynn/ZettaPlanner/backend/internal/service/contextsvc"
 	diagramsvc "github.com/Felodynn/ZettaPlanner/backend/internal/service/diagram"
 	plansvc "github.com/Felodynn/ZettaPlanner/backend/internal/service/plan"
 	"github.com/Felodynn/ZettaPlanner/backend/internal/service/project"
@@ -44,12 +45,18 @@ func newHarness(t *testing.T) *harness {
 		t.Fatalf("migrating: %v", err)
 	}
 
+	// No model registry: these tests run without an Ollama. Retrieval reports
+	// itself unavailable rather than silently returning nothing, which is one
+	// of the things the Phase 5 tests check.
+	contextSvc := contextsvc.New(db, quiet, nil)
+
 	api := httpapi.New(httpapi.Deps{
 		DB:       db,
 		Auth:     auth.New(db, quiet, 0),
 		Projects: project.New(db, quiet),
 		Diagrams: diagramsvc.New(db, quiet, 0),
-		Plan:     plansvc.New(db, quiet),
+		Plan:     plansvc.New(db, quiet, contextSvc),
+		Context:  contextSvc,
 		Log:      quiet,
 	})
 	srv := httptest.NewServer(api.Handler)

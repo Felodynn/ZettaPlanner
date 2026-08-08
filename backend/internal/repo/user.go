@@ -34,6 +34,35 @@ func (Users) ByID(ctx context.Context, q store.Querier, id uuid.UUID) (*domain.U
 	return scanUser(q.QueryRow(ctx, sql, id))
 }
 
+// DisplayNames resolves several users to their display names in one round trip.
+//
+// Context assembly names every assignee it prints. A model handed a UUID cannot
+// say anything useful about who is doing the work, and neither can a person
+// reading the assembled context to find out why the model said something.
+func (Users) DisplayNames(ctx context.Context, q store.Querier, ids []uuid.UUID) (map[uuid.UUID]string, error) {
+	out := map[uuid.UUID]string{}
+	if len(ids) == 0 {
+		return out, nil
+	}
+	const sql = `SELECT id, display_name FROM users WHERE id = ANY($1)`
+	rows, err := q.Query(ctx, sql, ids)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var (
+			id   uuid.UUID
+			name string
+		)
+		if err := rows.Scan(&id, &name); err != nil {
+			return nil, err
+		}
+		out[id] = name
+	}
+	return out, rows.Err()
+}
+
 // ByEmail returns a live user by normalised email.
 func (Users) ByEmail(ctx context.Context, q store.Querier, email string) (*domain.User, error) {
 	const sql = `SELECT ` + userColumns + ` FROM users WHERE email = $1 AND deleted_at IS NULL`

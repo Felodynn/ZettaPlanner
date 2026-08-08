@@ -39,10 +39,28 @@ import (
 	"github.com/Felodynn/ZettaPlanner/backend/internal/store"
 )
 
+// Indexer writes a worklog into the vector store, inside the transaction that
+// wrote the worklog.
+//
+// An interface here rather than a dependency on the context service, so the
+// plan does not import the thing that reads the plan. Nil is a supported
+// configuration — a deployment with no embedding model still records work; what
+// it loses is context assembly's third layer, and the assembled context says so
+// rather than showing an empty section.
+//
+// When it is **not** nil and fails, the write fails with it. A worklog that
+// committed but did not index is invisible to the planner with nothing to show
+// that it happened, and "configured and broken" is a different situation from
+// "not configured" (D47).
+type Indexer interface {
+	IndexWorklog(ctx context.Context, q store.Querier, w *pl.Worklog) error
+}
+
 // Service is the plan application service.
 type Service struct {
-	db  *store.DB
-	log *slog.Logger
+	db      *store.DB
+	log     *slog.Logger
+	indexer Indexer
 
 	projects   repo.Projects
 	members    repo.Members
@@ -58,12 +76,12 @@ type Service struct {
 	users      repo.Users
 }
 
-// New builds the service.
-func New(db *store.DB, log *slog.Logger) *Service {
+// New builds the service. indexer may be nil.
+func New(db *store.DB, log *slog.Logger, indexer Indexer) *Service {
 	if log == nil {
 		log = slog.Default()
 	}
-	return &Service{db: db, log: log}
+	return &Service{db: db, log: log, indexer: indexer}
 }
 
 // ── subjects ─────────────────────────────────────────────────────────────────

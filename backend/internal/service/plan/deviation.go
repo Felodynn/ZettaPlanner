@@ -86,6 +86,11 @@ func (s *Service) RaiseDeviation(ctx context.Context, in CreateDeviationInput, p
 			if err := s.worklogs.Create(ctx, tx, w); err != nil {
 				return err
 			}
+			if s.indexer != nil {
+				if err := s.indexer.IndexWorklog(ctx, tx, w); err != nil {
+					return err
+				}
+			}
 			d.WorklogID = &w.ID
 		}
 

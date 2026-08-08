@@ -48,6 +48,56 @@ func (Entities) BySlug(ctx context.Context, q store.Querier, projectID uuid.UUID
 	return scanEntity(q.QueryRow(ctx, sql, projectID, slug))
 }
 
+// ByIDs resolves several entities at once, keyed by id.
+//
+// One round trip rather than one per id: the architecture slice names the far
+// end of every edge it prints, and a query per edge turns a small slice into
+// thirty round trips inside a single assembly.
+func (Entities) ByIDs(ctx context.Context, q store.Querier, ids []uuid.UUID) (map[uuid.UUID]*diagram.Entity, error) {
+	out := map[uuid.UUID]*diagram.Entity{}
+	if len(ids) == 0 {
+		return out, nil
+	}
+	const sql = `SELECT ` + entityColumns + ` FROM catalog_entities
+	              WHERE id = ANY($1) AND deleted_at IS NULL`
+	rows, err := q.Query(ctx, sql, ids)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		e, err := scanEntity(rows)
+		if err != nil {
+			return nil, err
+		}
+		out[e.ID] = e
+	}
+	return out, rows.Err()
+}
+
+// BySlugs resolves several entities by slug within a project, keyed by slug.
+func (Entities) BySlugs(ctx context.Context, q store.Querier, projectID uuid.UUID, slugs []string) (map[string]*diagram.Entity, error) {
+	out := map[string]*diagram.Entity{}
+	if len(slugs) == 0 {
+		return out, nil
+	}
+	const sql = `SELECT ` + entityColumns + ` FROM catalog_entities
+	              WHERE project_id = $1 AND slug = ANY($2) AND deleted_at IS NULL`
+	rows, err := q.Query(ctx, sql, projectID, slugs)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		e, err := scanEntity(rows)
+		if err != nil {
+			return nil, err
+		}
+		out[e.Slug] = e
+	}
+	return out, rows.Err()
+}
+
 // ListByProject returns every live entity in a project, ordered the way the
 // serializer orders nodes so callers do not have to re-sort.
 func (Entities) ListByProject(ctx context.Context, q store.Querier, projectID uuid.UUID) ([]*diagram.Entity, error) {

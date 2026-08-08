@@ -866,11 +866,36 @@ one hop). Recursive CTEs. This is the part a vector store cannot do.
 past messages, imported documents. Always filtered by project and usually by
 date or item. Structured objects are never chunked — notes especially (§3.4).
 
-**Digest.** `project_digest` is maintained incrementally on every accepted
-change. Harness-computed fields (open items, blocked items, recent decisions,
-deviation counts) are recomputed from the DB and **cannot drift**. Model-written
-fields (`current_hypothesis`, `dead_ends`, `open_questions`) are refreshed on
-demand and marked stale when the graph moves.
+Each layer states why it is empty rather than being absent. An empty section
+reads as "there is nothing relevant"; three of the four ways retrieval returns
+nothing actually mean "nothing was looked at" — no embedding model configured,
+nothing indexed yet, a corpus in a different embedding space.
+
+**Budget.** Assembly targets `assembly_budget` from the target model (§8), not
+`num_ctx`. What does not fit is dropped in a fixed order — retrieved passages,
+then the detail hanging off expanded items, then architecture relations, then
+the tail of the open-item list, then notes, then accepted decisions — and
+**every drop is named in the assembled output itself**, not merely logged.
+Silent truncation is the failure mode: a context that quietly lost the
+deviation explaining why an item is blocked produces a confidently wrong answer
+with nothing in the transcript to explain it.
+
+**Open deviations and rejected proposals are never dropped, at any budget.** If
+the assembly still does not fit after everything else has gone, it reports
+itself over budget rather than cutting into them.
+
+**Digest.** `project_digest` carries two halves that never touch.
+Harness-computed fields (open items, blocked items, recent decisions, deviation
+counts) are **recomputed from the database on every read** and therefore cannot
+drift; the stored copy is a cache nothing depends on. Model-written fields
+(`current_hypothesis`, `dead_ends`, `open_questions`) are refreshed on demand.
+
+Staleness is **derived, not flagged**: the digest records the project's
+`audit_log` high-water mark from when the model fields were written, and the log
+is append-only (§6.5), so "has the graph moved since" is a comparison. A flag
+set by every write path is correct until the fourteenth write path. Stale means
+dated, not wrong — the fields are kept, because the dead ends are the most
+valuable thing in them.
 
 The split is the point. In LumixAgents Phase 4, a model asked to summarise
 produced `dead_ends` describing events that never happened, reconstructed from
@@ -880,16 +905,30 @@ a hint, not a record, and the UI must not present them as fact.
 ### 6.4 Interfaces held open
 
 ```go
-type VectorStore interface {
+// internal/vector
+type Store interface {
     Upsert(ctx context.Context, chunks []Chunk) error
     Search(ctx context.Context, q Query) ([]Hit, error)
-    DeleteBySource(ctx context.Context, kind string, id uuid.UUID) error
+    DeleteBySource(ctx context.Context, kind SourceKind, id uuid.UUID) error
 }
 ```
 
 pgvector is the only implementation in v0 (D1). The interface exists so a Milvus
 implementation is a package, not a refactor. No caller may reach past it into
-SQL for similarity.
+SQL for similarity — a hand-written `ORDER BY embedding <=> $1` in a service is
+a second retrieval policy that nobody finds when the first one changes.
+
+`SourceKind` is the closed set of chunkable things: `worklog`, `message`,
+`document`. Notes, work items, proposals and entities are **never** offered to
+it.
+
+**Indexing happens inside the transaction that wrote the source row.** A
+worklog that committed but did not index is invisible to retrieval, and nothing
+downstream can distinguish that from "there was nothing relevant". The cost is
+that a worklog write depends on the embedding model answering; when an embedder
+is configured and fails, the write fails with it. That is why the embedding
+model is kept local and without a cloud fallback (§8) — a network round trip to
+another host inside an open transaction holds locks for its duration.
 
 ---
 

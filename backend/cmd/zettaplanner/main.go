@@ -41,6 +41,8 @@ func run(ctx context.Context, args []string) error {
 		return cmdOpenAPI(ctx, args[1:])
 	case "admin":
 		return cmdAdmin(ctx, args[1:])
+	case "context":
+		return cmdContext(ctx, args[1:])
 	case "help", "-h", "--help":
 		usage()
 		return nil
@@ -61,6 +63,7 @@ Usage:
   zettaplanner models check          Validate every configured model
   zettaplanner openapi               Emit the OpenAPI 3.1 document
   zettaplanner admin create-user     Create the first account (bootstrap)
+  zettaplanner context show          Print exactly what a turn would receive
 
 Environment:
   ZP_ADDR                  Listen address (default :8080)

@@ -2,6 +2,7 @@ package repo
 
 import (
 	"context"
+	"sort"
 
 	"github.com/google/uuid"
 
@@ -158,6 +159,128 @@ SELECT DISTINCT ON (w.entity_id)
 	// reader wants it instead.
 	sortRelated(out)
 	return out, nil
+}
+
+// Hop is one edge touching an entity, with the far end named and the diagram it
+// was drawn in.
+//
+// There is no coordinate on this type and there must never be one. The
+// architecture slice is what a planner reads to answer "what does this touch",
+// and geometry in that answer invites it to derive flow from position rather
+// than from the relations (D5).
+type Hop struct {
+	EntityID uuid.UUID
+	// Inbound reports whether the edge points at this entity rather than away
+	// from it.
+	Inbound     bool
+	Relation    diagram.Relation
+	Label       string
+	OtherID     uuid.UUID
+	OtherSlug   string
+	OtherName   string
+	OtherKind   diagram.NodeKind
+	DiagramSlug string
+}
+
+// Hops returns one hop in each direction around each of the given entities.
+//
+// This is §6.3's "the diagram slice around those entities: nodes plus one hop",
+// and it is deliberately **one** hop. Two hops around five entities is most of
+// a project's architecture, arriving in a context window as though every part
+// of it were relevant to the question.
+//
+// Every relation is included, structural ones as well: unlike "what depends on
+// X", the question here is "what is drawn around X", and a boundary containing
+// something is part of the answer.
+func (Graphs) Hops(ctx context.Context, q store.Querier, projectID uuid.UUID, entityIDs []uuid.UUID) ([]Hop, error) {
+	if len(entityIDs) == 0 {
+		return nil, nil
+	}
+	const sql = `
+		WITH edge AS (
+		  SELECT nf.entity_id AS from_entity,
+		         nt.entity_id AS to_entity,
+		         e.relation,
+		         coalesce(e.label, '') AS label,
+		         d.slug AS diagram_slug
+		    FROM diagram_edges e
+		    JOIN diagrams d       ON d.id  = e.diagram_id   AND d.deleted_at IS NULL AND d.project_id = $1
+		    JOIN diagram_nodes nf ON nf.id = e.from_node_id AND nf.deleted_at IS NULL
+		    JOIN diagram_nodes nt ON nt.id = e.to_node_id   AND nt.deleted_at IS NULL
+		   WHERE e.deleted_at IS NULL
+		)
+		SELECT from_entity, false, relation, label, to_entity, diagram_slug
+		  FROM edge WHERE from_entity = ANY($2)
+		UNION ALL
+		SELECT to_entity, true, relation, label, from_entity, diagram_slug
+		  FROM edge WHERE to_entity = ANY($2)`
+
+	rows, err := q.Query(ctx, sql, projectID, entityIDs)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var (
+		hops  []Hop
+		other = map[uuid.UUID]bool{}
+	)
+	for rows.Next() {
+		var (
+			h        Hop
+			relation string
+		)
+		if err := rows.Scan(&h.EntityID, &h.Inbound, &relation, &h.Label, &h.OtherID, &h.DiagramSlug); err != nil {
+			return nil, err
+		}
+		h.Relation = diagram.Relation(relation)
+		hops = append(hops, h)
+		other[h.OtherID] = true
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	if len(hops) == 0 {
+		return nil, nil
+	}
+
+	// Name the far ends in one round trip. A slice full of UUIDs is a slice a
+	// model cannot say anything about.
+	ids := make([]uuid.UUID, 0, len(other))
+	for id := range other {
+		ids = append(ids, id)
+	}
+	named, err := (Entities{}).ByIDs(ctx, q, ids)
+	if err != nil {
+		return nil, err
+	}
+	kept := hops[:0]
+	for _, h := range hops {
+		e, ok := named[h.OtherID]
+		if !ok {
+			continue // the far end has been deleted; the edge is not worth reporting
+		}
+		h.OtherSlug, h.OtherName, h.OtherKind = e.Slug, e.Name, e.Kind
+		kept = append(kept, h)
+	}
+	sortHops(kept)
+	return kept, nil
+}
+
+func sortHops(in []Hop) {
+	sort.SliceStable(in, func(i, j int) bool {
+		a, b := in[i], in[j]
+		if a.EntityID != b.EntityID {
+			return a.EntityID.String() < b.EntityID.String()
+		}
+		if a.Inbound != b.Inbound {
+			return !a.Inbound // outgoing first: what this thing does, then what is done to it
+		}
+		if a.Relation != b.Relation {
+			return a.Relation < b.Relation
+		}
+		return a.OtherSlug < b.OtherSlug
+	})
 }
 
 func sortRelated(in []Related) {

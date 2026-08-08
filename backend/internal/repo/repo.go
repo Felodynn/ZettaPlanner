@@ -50,6 +50,11 @@ func missing(kind string) error {
 // absence is a normal answer rather than a failure.
 func isNotFound(err error) bool { return errors.Is(err, domain.ErrNotFound) }
 
+// isNoRows reports pgx's own no-rows, for the handful of queries where absence
+// is the expected first state rather than a missing thing — a project with no
+// digest row yet has not lost one.
+func isNoRows(err error) bool { return errors.Is(err, pgx.ErrNoRows) }
+
 // conflict maps a unique-constraint violation onto the domain sentinel, naming
 // the constraint so the service can turn it into a message about the field the
 // user actually typed.
