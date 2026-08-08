@@ -7,29 +7,25 @@ import (
 	"unicode"
 
 	"github.com/google/uuid"
+
+	"github.com/Felodynn/ZettaPlanner/backend/internal/domain"
 )
 
 // Provenance is where an object came from (CONTRACT §3.7).
-type Provenance string
+//
+// Aliased from the root domain package: §3.7 applies it to work items and plan
+// fields as well as to nodes and edges, and two enums spelling the same six
+// strings would eventually disagree about one of them.
+type Provenance = domain.Provenance
 
 const (
-	ProvVLMExtracted   Provenance = "vlm_extracted"
-	ProvHumanCreated   Provenance = "human_created"
-	ProvHumanEdited    Provenance = "human_edited"
-	ProvAgentProposed  Provenance = "agent_proposed"
-	ProvAgentCommitted Provenance = "agent_committed"
-	ProvSystem         Provenance = "system"
+	ProvVLMExtracted   = domain.ProvVLMExtracted
+	ProvHumanCreated   = domain.ProvHumanCreated
+	ProvHumanEdited    = domain.ProvHumanEdited
+	ProvAgentProposed  = domain.ProvAgentProposed
+	ProvAgentCommitted = domain.ProvAgentCommitted
+	ProvSystem         = domain.ProvSystem
 )
-
-// Valid reports whether p is a known provenance.
-func (p Provenance) Valid() bool {
-	switch p {
-	case ProvVLMExtracted, ProvHumanCreated, ProvHumanEdited,
-		ProvAgentProposed, ProvAgentCommitted, ProvSystem:
-		return true
-	}
-	return false
-}
 
 // Entity is a project-level named architectural thing — the identity that makes
 // "what depends on the token store" answerable across the whole project rather

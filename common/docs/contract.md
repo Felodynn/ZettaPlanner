@@ -257,6 +257,40 @@ work items, plus **dependency violation warnings** (item starts before its
 blocker's due date; item due after its milestone's due date). **No
 auto-scheduling and no critical-path computation.** [DEFERRED]
 
+Warnings are **computed on read and stored nowhere**. A stored warning is stale
+the moment a date moves, and reads identically whether it is true now or was
+true in April. Moving a blocker's date produces a warning and nothing else: a
+cascade that is right 90% of the time silently destroys the dates somebody set
+by hand, and they find out weeks later.
+
+#### 3.5a The plan's closed vocabularies
+
+Closed for the same reason the node kinds are (D6): the planner agent is taught
+these sets, and a value outside them is not a validation failure but a work item
+no query ever finds again.
+
+| Field | Values |
+|---|---|
+| `work_items.status`, `sub_tasks.status` | `todo` `in_progress` `blocked` `review` `done` `dropped` |
+| `milestones.status` | `planned` `active` `done` `dropped` |
+| `work_items.priority` | `low` `normal` `high` `urgent`, or unset |
+| `deviations.severity` | `low` `medium` `high` |
+| `worklogs.kind` | `progress` `deviation` `note` |
+| `item_dependencies.kind` | `blocks` `relates` |
+| `item_entity_refs.relation` | `implements` |
+
+Work items and subtasks share one status vocabulary: it is one thing to teach an
+agent rather than two, and it makes "how long did this spend in each status" the
+same query at both levels. Milestones get a deliberately coarser set — a
+milestone is not `blocked` or `review`, those are facts about the items inside
+it, and a milestone status that contradicts its own contents is worse than no
+status. **An unset priority is not `normal`:** an untriaged item and one
+explicitly judged ordinary are different facts.
+
+`dropped` is not a delete. It is for when the decision *not* to do something is
+worth keeping; deletion (§6.5) removes an item from every view while leaving its
+history queryable.
+
 ### 3.6 Conversation
 
 **One thread per project, globally visible to every project member.** Everyone
@@ -330,6 +364,16 @@ node. Requiring a manager to tidy a canvas would mean the people who read a
 diagram most cannot make it readable. Re-running automatic layout on a `manual`
 diagram *is* in the table, under Diagram, because it destroys everybody's
 arrangement.
+
+**A dev-owned rule scoped to the whole project is a floor, not a ceiling.** It
+says "you need not be a manager to do this", and it is how Worklog, Deviation
+and Note creation is open to everybody on the project. Read as a ceiling it
+would mean a manager cannot file a worklog or raise a deviation on their own
+project — and a manager who cannot record what went wrong stops recording it,
+which is exactly the evidence a retrospective is built from. The floor applies
+to **lifecycle rules only** (create and delete). Dev-owned *fields* stay a
+ceiling: `status` is the developer's report of reality, and a manager
+overwriting it destroys the signal rather than correcting it.
 
 **The rule that follows:**
 
@@ -425,6 +469,7 @@ CREATE TABLE projects (
   id UUID PRIMARY KEY, key TEXT UNIQUE NOT NULL, name TEXT NOT NULL,
   description TEXT, status TEXT NOT NULL, settings JSONB NOT NULL DEFAULT '{}',
   git_enabled BOOLEAN NOT NULL DEFAULT FALSE,
+  ref_seq INT NOT NULL DEFAULT 0,            -- monotonic; issues work_items.ref
   created_at TIMESTAMPTZ NOT NULL, updated_at TIMESTAMPTZ NOT NULL
 );
 
@@ -545,7 +590,8 @@ CREATE TABLE ingest_pages (
 CREATE TABLE milestones (
   id UUID PRIMARY KEY, project_id UUID NOT NULL REFERENCES projects(id),
   name TEXT NOT NULL, intent TEXT, seq INT NOT NULL,
-  start_date DATE, due_date DATE, status TEXT NOT NULL,
+  start_date DATE, due_date DATE,
+  status TEXT NOT NULL,                     -- planned|active|done|dropped
   provenance TEXT NOT NULL, actor_id UUID NOT NULL REFERENCES actors(id),
   created_at TIMESTAMPTZ NOT NULL, updated_at TIMESTAMPTZ NOT NULL
 );
@@ -553,12 +599,14 @@ CREATE TABLE milestones (
 CREATE TABLE work_items (
   id UUID PRIMARY KEY, project_id UUID NOT NULL REFERENCES projects(id),
   milestone_id UUID REFERENCES milestones(id),
-  ref TEXT NOT NULL,                          -- human-facing, e.g. "ZP-14"
+  ref TEXT NOT NULL,                          -- human-facing, e.g. "ZP-14"; issued from
+                                              -- projects.ref_seq and NEVER reissued
   title TEXT NOT NULL, intent TEXT,
   acceptance_criteria TEXT,
   status TEXT NOT NULL,                       -- todo|in_progress|blocked|review|done|dropped
   progress_pct INT NOT NULL DEFAULT 0,
-  priority TEXT, assignee_id UUID REFERENCES users(id),
+  priority TEXT,                              -- low|normal|high|urgent; NULL means untriaged
+  assignee_id UUID REFERENCES users(id),
   start_date DATE, due_date DATE,
   provenance TEXT NOT NULL, actor_id UUID NOT NULL REFERENCES actors(id),
   created_at TIMESTAMPTZ NOT NULL, updated_at TIMESTAMPTZ NOT NULL,
@@ -567,7 +615,9 @@ CREATE TABLE work_items (
 
 CREATE TABLE sub_tasks (
   id UUID PRIMARY KEY, work_item_id UUID NOT NULL REFERENCES work_items(id),
-  title TEXT NOT NULL, status TEXT NOT NULL, seq INT NOT NULL,
+  title TEXT NOT NULL,
+  status TEXT NOT NULL,                       -- the work_items vocabulary, unchanged
+  seq INT NOT NULL,
   assignee_id UUID REFERENCES users(id),
   provenance TEXT NOT NULL, actor_id UUID NOT NULL REFERENCES actors(id),
   created_at TIMESTAMPTZ NOT NULL, updated_at TIMESTAMPTZ NOT NULL
@@ -890,20 +940,26 @@ POST   /api/v1/ingests/{id}/accept              → creates or updates a Diagram
 GET    /api/v1/projects/{pid}/milestones
 POST   /api/v1/projects/{pid}/milestones
 PATCH  /api/v1/milestones/{id}
+DELETE /api/v1/milestones/{id}                  → soft; its work items survive, detached
 GET    /api/v1/projects/{pid}/work-items        ?assignee=&status=&milestone=
 POST   /api/v1/projects/{pid}/work-items
-GET    /api/v1/work-items/{id}
+GET    /api/v1/work-items/{id}                  → returns a deleted item too, with deleted_at
 PATCH  /api/v1/work-items/{id}                  → field ownership enforced (§4.2)
+DELETE /api/v1/work-items/{id}                  → soft; the ref is never reissued
 POST   /api/v1/work-items/{id}/sub-tasks
 PATCH  /api/v1/sub-tasks/{id}
-PUT    /api/v1/work-items/{id}/dependencies
+DELETE /api/v1/sub-tasks/{id}                   → soft
+PUT    /api/v1/work-items/{id}/dependencies     → 400 with the path named on a `blocks` cycle
 PUT    /api/v1/work-items/{id}/entity-refs
 POST   /api/v1/work-items/{id}/checklist
 PATCH  /api/v1/checklist/{id}
+DELETE /api/v1/checklist/{id}                   → soft
 POST   /api/v1/work-items/{id}/worklogs
 GET    /api/v1/projects/{pid}/worklogs          ?since=&item=&kind=
 POST   /api/v1/projects/{pid}/deviations
+GET    /api/v1/projects/{pid}/deviations        ?item=&open=
 PATCH  /api/v1/deviations/{id}
+DELETE /api/v1/deviations/{id}                  → soft
 GET    /api/v1/projects/{pid}/warnings          → dependency/date violations
 
 GET    /api/v1/projects/{pid}/threads
@@ -932,6 +988,12 @@ GET    /api/v1/admin/users/{id}                 (admin, or your own)
 PATCH  /api/v1/admin/users/{id}                 (admin)
 DELETE /api/v1/admin/users/{id}                 (admin) → soft delete
 ```
+
+**Every DELETE above is soft** (§6.5 constraint 1): it sets `deleted_at` and
+writes a `*.deleted` audit entry. **There is deliberately no route to edit or
+delete a worklog.** A worklog is corrected by adding another, which is what
+makes the log evidence rather than a current-state field — and what makes "what
+did we believe on the 12th" answerable at all.
 
 **The first account is created out of band.** `zettaplanner admin create-user`
 bootstraps it and refuses the moment any account exists, because without an

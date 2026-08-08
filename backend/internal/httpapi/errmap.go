@@ -8,6 +8,7 @@ import (
 	"github.com/Felodynn/ZettaPlanner/backend/internal/domain"
 	"github.com/Felodynn/ZettaPlanner/backend/internal/domain/diagram"
 	"github.com/Felodynn/ZettaPlanner/backend/internal/domain/ingest"
+	"github.com/Felodynn/ZettaPlanner/backend/internal/domain/plan"
 	"github.com/Felodynn/ZettaPlanner/backend/internal/llm"
 	"github.com/Felodynn/ZettaPlanner/backend/internal/policy"
 	"github.com/Felodynn/ZettaPlanner/backend/internal/repo"
@@ -115,6 +116,17 @@ func mapError(ctx context.Context, log *slog.Logger, err error) error {
 	if errors.As(err, &illegible) {
 		return Errorf(CodeValidationFailed, "%s", illegible.Error()).
 			WithDetail("unreadable", illegible.Slugs()).
+			WithRequestID(requestID(ctx))
+	}
+
+	// A dependency that would close a loop in `blocks`. The path is in the
+	// details as well as in the message, so a client can highlight the ring
+	// rather than making somebody read it out of prose — and so an agent gets
+	// the offending items as data rather than having to parse arrows.
+	var cycle *plan.CycleError
+	if errors.As(err, &cycle) {
+		return Errorf(CodeValidationFailed, "%s", cycle.Error()).
+			WithDetail("cycle", cycle.Path).
 			WithRequestID(requestID(ctx))
 	}
 

@@ -364,6 +364,20 @@ func (s Subject) allows(kind ObjectKind, field string, rule Rule) *Denial {
 		return s.deny(kind, field, rule, "raise a proposal")
 
 	case OwnerDeveloper:
+		// A dev-owned, project-scoped *lifecycle* rule is a floor, not a
+		// ceiling: it says "you do not have to be a manager to do this", and it
+		// is how worklogs, deviations and notes are opened to everybody. Read
+		// as a ceiling it would mean a manager cannot file a worklog or raise a
+		// deviation, and a manager who cannot record what went wrong is a
+		// manager who stops recording it — which is precisely the evidence the
+		// retrospective is built from (D42).
+		//
+		// Scoped to field == "", which is only ever a create or a delete check.
+		// No dev-owned *field* is project-scoped, and if one were ever added
+		// this exemption must not silently swallow it.
+		if field == "" && rule.Scope == ScopeProject {
+			return nil
+		}
 		// Not a ladder: a manager does not acquire a dev-owned field by
 		// outranking its owner. The route out is to reassign, which is itself
 		// a manager-owned field.

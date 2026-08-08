@@ -11,8 +11,7 @@
 package diagram
 
 import (
-	"fmt"
-	"strings"
+	"github.com/Felodynn/ZettaPlanner/backend/internal/domain"
 )
 
 // NodeKind is the closed set of node kinds (CONTRACT §3.3, D6).
@@ -172,42 +171,21 @@ func (l Level) String() string { return string(l) }
 
 // VocabularyError is an unknown kind, relation or level.
 //
-// Its message lists every valid value with its meaning. That text is read by
-// the vision model on ingest and by the planner agent when a tool call is
-// rejected, and it is the only teaching either of them gets — a bare "invalid
-// kind" produces a second invalid kind (BACKEND.md Phase 2).
-type VocabularyError struct {
-	Field string
-	Value string
-	Valid []string
-	Hint  string
-}
-
-func (e *VocabularyError) Error() string {
-	var b strings.Builder
-	fmt.Fprintf(&b, "%q is not a valid %s. The %s vocabulary is closed and these are all of it:\n", e.Value, e.Field, e.Field)
-	for _, v := range e.Valid {
-		fmt.Fprintf(&b, "  - %s\n", v)
-	}
-	if e.Hint != "" {
-		fmt.Fprintf(&b, "%s", e.Hint)
-	}
-	return strings.TrimRight(b.String(), "\n")
-}
+// An alias, not a type of its own: the plan's statuses and priorities are closed
+// sets too, and one error shape for every closed vocabulary is one case in the
+// HTTP error map rather than one per package. Existing references — including
+// the errors.As in httpapi — are unaffected, because an alias is the same type.
+type VocabularyError = domain.VocabularyError
 
 // ValidateNodeKind returns nil or a teaching error.
 func ValidateNodeKind(kind NodeKind) error {
 	if kind.Valid() {
 		return nil
 	}
-	valid := make([]string, 0, len(nodeKindMeaning))
-	for _, k := range NodeKinds() {
-		valid = append(valid, fmt.Sprintf("%-16s %s", k, nodeKindMeaning[k]))
-	}
 	return &VocabularyError{
 		Field: "node kind",
 		Value: string(kind),
-		Valid: valid,
+		Valid: domain.Glossed(NodeKinds(), NodeKindMeaning),
 		Hint:  "Pick the closest one rather than inventing a kind; a kind that does not exist is a schema migration, not a configuration change.",
 	}
 }
@@ -217,14 +195,10 @@ func ValidateRelation(rel Relation) error {
 	if rel.Valid() {
 		return nil
 	}
-	valid := make([]string, 0, len(relationMeaning))
-	for _, r := range Relations() {
-		valid = append(valid, fmt.Sprintf("%-16s %s", r, relationMeaning[r]))
-	}
 	return &VocabularyError{
 		Field: "edge relation",
 		Value: string(rel),
-		Valid: valid,
+		Valid: domain.Glossed(Relations(), RelationMeaning),
 		Hint:  "Use data_flow when nothing more specific is true, rather than inventing a relation.",
 	}
 }
@@ -237,11 +211,16 @@ func ValidateLevel(level Level) error {
 	return &VocabularyError{
 		Field: "diagram level",
 		Value: string(level),
-		Valid: []string{
-			"context          the system and what surrounds it",
-			"container        the deployable pieces inside one system",
-			"component        the modules inside one container",
-		},
+		Valid: domain.Glossed(Levels(), func(l Level) string {
+			switch l {
+			case LevelContext:
+				return "the system and what surrounds it"
+			case LevelContainer:
+				return "the deployable pieces inside one system"
+			default:
+				return "the modules inside one container"
+			}
+		}),
 		Hint: "Sequence diagrams are deferred to v0.1; they are a different shape with a different editor.",
 	}
 }

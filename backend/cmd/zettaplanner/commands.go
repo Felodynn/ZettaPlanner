@@ -19,6 +19,7 @@ import (
 	"github.com/Felodynn/ZettaPlanner/backend/internal/service/auth"
 	diagramsvc "github.com/Felodynn/ZettaPlanner/backend/internal/service/diagram"
 	ingestsvc "github.com/Felodynn/ZettaPlanner/backend/internal/service/ingest"
+	plansvc "github.com/Felodynn/ZettaPlanner/backend/internal/service/plan"
 	"github.com/Felodynn/ZettaPlanner/backend/internal/service/project"
 	"github.com/Felodynn/ZettaPlanner/backend/internal/store"
 	"github.com/Felodynn/ZettaPlanner/backend/internal/telemetry"
@@ -86,6 +87,7 @@ func cmdServe(ctx context.Context, args []string) error {
 	projectSvc := project.New(db, log)
 	diagramSvc := diagramsvc.New(db, log, cfg.LeaseTTL)
 	ingestSvc := ingestsvc.New(db, log, registry, diagramSvc, cfg.UploadsDir)
+	planSvc := plansvc.New(db, log)
 
 	// An ingest left mid-flight by a killed process is indistinguishable from
 	// one still working, and the difference matters to whoever is waiting for
@@ -101,6 +103,7 @@ func cmdServe(ctx context.Context, args []string) error {
 		Projects:      projectSvc,
 		Diagrams:      diagramSvc,
 		Ingests:       ingestSvc,
+		Plan:          planSvc,
 		Log:           log,
 		Started:       time.Now(),
 		SecureCookies: cfg.SecureCookies,

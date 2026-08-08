@@ -370,6 +370,11 @@ if you were the model.
 | D38 | **Ollama Cloud accepts `format` and ignores it.** Startup validation probes for it and reports `format_enforced` per model; the ingest prompt restates the required shape, the parser finds the JSON object inside whatever prose arrives, and a wrong answer is retried once with the teaching error | Measured against Ollama 0.30.11 with a two-property schema: locally-served `gemma4:12b` returns a conforming object; `gemma4:31b-cloud` and `glm-5.2:cloud` both return markdown prose. **This is the third instance of one pattern** — `/v1/chat/completions` discarding `num_ctx` (D4), `/api/ps` reporting nothing for cloud (D20), `format` discarded — and it is worth stating as a rule: a guarantee that holds for weights we run does not hold for weights we rent, and nothing in the response says which you got. It found a real bug the same day: the first cloud extraction returned three arrows, zero boxes, and a key called `boxes`, and the decoder reported success. A warning rather than a failure, because the harness copes — but `models check` says which behaviour a deployment has, because "copes" and "guaranteed" are different properties |
 | D39 | **`ingest_pages.raw_output` stores the model's answer byte for byte, on success and on failure.** `extracted` is not a substitute | `extracted` is JSONB reached through a Go struct: keys reordered, unknown fields dropped, an undecodable array turned into `null`. Each of those destroys the answer to "what did the model actually say", which is the only question worth asking when an extraction is wrong — and it was the reason D38 took an extra hour to find, because the stored "raw" output was our own re-marshal showing `nodes: null` when the model had never used that key. Stored on failure too: a malformed answer is the one you most want to read |
 | D40 | **An extraction with no nodes is a failure, not an empty page.** `error_class: no_nodes`, retried once with a correction naming the key | Every arrow starts and ends at a box, so a page with arrows has boxes. Reporting success over a payload containing nothing makes an empty result and a correct one indistinguishable, which is how a user ends up accepting a diagram with seven arrows and no services in it. Paired with the hard gate on illegible elements, this is the phase's general rule: **the harness never lets "the model said nothing useful" look like "there was nothing to say"** |
+| D41 | **`VocabularyError` and `Provenance` moved to the root `domain` package, aliased in `domain/diagram`** | §3.7 already says provenance applies to "every node, edge, work item, and plan field", and the plan's statuses are closed sets needing the same teaching error. The alternatives were a plan package importing the diagram package for an error shape, or a second error type the HTTP layer had to learn about — and a second copy of the six provenance strings that would eventually disagree about one of them. Aliases keep every existing reference and the `errors.As` in `errmap.go` working unchanged, because an alias is the same type |
+| D42 | **A dev-owned rule scoped to the project is a floor, not a ceiling** — for lifecycle checks only. Contract §4.2 amended | Found by building Phase 4 against Phase 1's table: `OwnerDeveloper` denied every non-developer, so a **manager could not file a worklog, raise a deviation, or open a note on their own project**. Phases 2 and 3 never hit it because notes were created by the system path. A manager who cannot record what went wrong stops recording it, and that is precisely the evidence the retrospective is built from. The exemption is deliberately narrow — it applies where the field name is empty, which is only ever create or delete — and a generated test fails the moment a dev-owned *field* is given project scope, because that field would silently inherit a reading nobody intended. Dev-owned fields stay a ceiling: a manager still cannot write `status` |
+| D43 | **Work item refs come from `projects.ref_seq`, a monotonic counter read with `UPDATE ... RETURNING`** (migration 0005, contract §6.1 amended) | 0001 already refuses to make the ref index partial so that `ZP-14` is never reissued after `ZP-14` is dropped. `max(ref)+1` would satisfy that only by parsing an integer out of text, and would race between two concurrent creates. The counter is exact, and the row lock the UPDATE takes serialises the creates for free — no advisory lock, no retry loop |
+| D44 | **The plan's four status vocabularies are closed in the schema** (`milestones.status`, `sub_tasks.status`, `work_items.priority`; migration 0005). Work items and subtasks **share** one set; milestones get a coarser one; an unset priority is not `normal` | 0001 left these as bare TEXT because the contract's schema block does, and every other status column in the database carries its set. A typo'd status is not a validation failure, it is a work item no query ever finds again. Sharing the set between items and subtasks is one thing to teach the planner rather than two, and makes the time-in-status query identical at both levels. Milestones are coarser on purpose: a milestone is not `blocked` or `review` — those are facts about the items inside it, and offering them invites a status that contradicts its own contents |
+| D45 | **A patch that changes only a transition writes only the transition entry** | The obvious implementation writes `*.updated` alongside every `*.status_changed`, and its before and after are then identical. That is worse than no row: it records an edit that never happened, and the export cannot tell it from one that did. So each fact is written only when it moved — up to four entries from one PATCH (status, assignee, milestone, everything else), grouped by the shared `request_id` |
 | Q3 | **Answered: per-page wins, and not narrowly** | Same schema, same rules, same model, same three pages. Per-page: 7 nodes, 7 edges, correct kinds, both dangling arrows flagged. Whole-document, three trials: **0 nodes every time**, 7 edges every time, and an invented `unknown_destination` endpoint. The failure is not "worse cross-page linking" as assumed — the model stops emitting the first array altogether once the input is multi-image, so there is nothing for the edges to attach to. Whole-document is cheaper in input tokens (1,605 against 3,840, since the images share one prompt) and the output is unusable. Latency on the real cloud model was 7–10s per page. The one thing per-page genuinely loses is that whole-document *did* join `auth_service → token_store` across the page break; per-page could not, and correctly recorded it as unresolved rather than guessing |
 | Q6 | **Lease TTL 5 minutes, heartbeat 60 seconds** — answered, and due to be revisited in dogfood | Long enough to survive a screen lock, a network blip, or a lid closed while somebody answers the door; short enough that a browser killed mid-edit does not hold a diagram for an afternoon. A sleeping laptop loses its lease, which is the correct outcome — the alternative is a diagram nobody can touch because of a machine that is not coming back. The TTL is published in the acquire response so the frontend does not hard-code a number that later disagrees with the server |
 
@@ -512,16 +517,47 @@ curl /api/v1/projects/{pid}/warnings
 ```
 
 **Exit criteria:**
-- [ ] Full plan CRUD with field ownership enforced per field
-- [ ] Dependency cycles rejected with the offending path named
-- [ ] Warnings computed live for blocker-date and milestone-date violations
-- [ ] Developer can write dev-owned fields on assigned items only
-- [ ] Entity refs are set explicitly and never derived
-- [ ] Every status change and checklist tick recorded as a transition action
-- [ ] Soft delete only; a deleted item's history stays queryable
-- [ ] `audit_log` reconstructs the full history of one work item — and a single
+- [x] Full plan CRUD with field ownership enforced per field
+- [x] Dependency cycles rejected with the offending path named
+- [x] Warnings computed live for blocker-date and milestone-date violations
+- [x] Developer can write dev-owned fields on assigned items only
+- [x] Entity refs are set explicitly and never derived
+- [x] Every status change and checklist tick recorded as a transition action
+- [x] Soft delete only; a deleted item's history stays queryable
+- [x] `audit_log` reconstructs the full history of one work item — and a single
       SQL query answers "how long did this item spend in each status", with no
       stored duration field anywhere
+
+**Notes on what was built:**
+
+- **The ownership table did the work.** Phase 1 put every plan field into
+  `internal/policy` before any of them could be written; Phase 4 added no
+  per-field logic at all, only handlers that hand `policy.Fields(body)` to
+  `CheckWrite`. Two generated tests keep it honest in both directions: no patch
+  body carries a field the table has never heard of, and no rule in the table is
+  unreachable from any endpoint — a dead rule reads in review as an enforced one.
+- **A PATCH can produce four audit entries.** A request that moves the status,
+  the assignee, the milestone and the title is four facts, and they are written
+  as `status_changed`, `assigned`, `milestone_changed` and `updated`, sharing one
+  `request_id`. The inverse matters as much: a status-only PATCH writes no
+  `work_item.updated`, because an audit row whose before and after are identical
+  puts an edit in the history that never happened.
+- **Cycle detection runs after the write, inside the transaction.** Checking
+  first would mean modelling the proposed graph in Go; checking after lets
+  Postgres answer against the rows that exist and the rollback undo them. The
+  walk is seeded from the item just written rather than from the whole project:
+  the graph was acyclic before this transaction, so any cycle now runs through
+  one of the new edges.
+- **Refs come from a counter on the project row, not `max(ref)+1`.** The
+  `UPDATE ... RETURNING` takes a row lock, which serialises two concurrent
+  creates without an advisory lock or a retry loop, and a counter that only ever
+  goes up cannot reissue `ZP-14` after `ZP-14` is deleted. Verified: deleting
+  ZP-3 and creating another item issued ZP-4.
+- **Dates are calendar days, and `""` means clear.** A JSON null cannot say
+  "remove this" through a Go pointer — absent and null both decode to nil — so
+  the optional date and id fields carry wire strings and the empty one clears.
+  A range that runs backwards is refused rather than reordered: one of the two
+  dates is a typo and the system cannot tell which.
 
 ---
 
@@ -780,3 +816,4 @@ harness and got lucky*.
 | Q5 | Should item-scoped threads have their own context skeleton, or share the project one? | Phase 6 |
 | Q6 | Lease TTL and heartbeat interval that survive a laptop sleeping | Phase 2, then revisit in dogfood |
 | Q7 | What shape the v0.1 audit export takes — one flat CSV or several (transitions, worklogs, turns, raw events) | v0.1, from the Phase 8 rehearsal and real dogfood data. Deliberately not decided now |
+| Q8 | **Should a subtask's own assignee be able to write it?** Today they cannot: §4.2 scopes SubTask and ChecklistItem to the assignee of the *parent item* ("within own item"), so handing somebody a subtask without reassigning the item leaves them unable to tick it. Implemented as the table says rather than widened silently | Dogfood (Phase 9), alongside D25. Both are the same shape of question — a rule that reads correctly in the table and may be wrong in a real week |

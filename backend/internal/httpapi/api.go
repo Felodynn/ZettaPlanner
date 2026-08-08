@@ -22,6 +22,7 @@ import (
 	"github.com/Felodynn/ZettaPlanner/backend/internal/service/auth"
 	diagramsvc "github.com/Felodynn/ZettaPlanner/backend/internal/service/diagram"
 	ingestsvc "github.com/Felodynn/ZettaPlanner/backend/internal/service/ingest"
+	plansvc "github.com/Felodynn/ZettaPlanner/backend/internal/service/plan"
 	"github.com/Felodynn/ZettaPlanner/backend/internal/service/project"
 	"github.com/Felodynn/ZettaPlanner/backend/internal/store"
 	"github.com/Felodynn/ZettaPlanner/backend/internal/telemetry"
@@ -42,10 +43,20 @@ func init() {
 	// OpenAPI document, so overriding it is what stops the document describing
 	// a shape this server never sends.
 	huma.NewError = func(status int, msg string, errs ...error) huma.StatusError {
-		return newAPIError(status, msg, errs...)
+		return newAPIError("", status, msg, errs...)
 	}
 	huma.NewErrorWithContext = func(ctx huma.Context, status int, msg string, errs ...error) huma.StatusError {
-		err := newAPIError(status, msg, errs...)
+		var path string
+		if ctx != nil {
+			// The path disambiguates which closed vocabulary a field belongs
+			// to. `body.status` is a work item's set on one route and a
+			// milestone's deliberately coarser set on another, and guessing
+			// from the value would teach the wrong one exactly when somebody
+			// sent a value that is valid in the other.
+			url := ctx.URL()
+			path = url.Path
+		}
+		err := newAPIError(path, status, msg, errs...)
 		if ctx != nil {
 			err.WithRequestID(telemetry.RequestID(ctx.Context()))
 		}
@@ -56,7 +67,7 @@ func init() {
 // newAPIError normalises whatever huma raised into the contract envelope. An
 // *Error already in the chain wins: a handler that took the trouble to write
 // teaching denial text must not have it replaced by a status code's default.
-func newAPIError(status int, msg string, errs ...error) *Error {
+func newAPIError(path string, status int, msg string, errs ...error) *Error {
 	var apiErr *Error
 	for _, err := range errs {
 		if errors.As(err, &apiErr) {
@@ -75,7 +86,7 @@ func newAPIError(status int, msg string, errs ...error) *Error {
 		// A schema failure on a closed-set field is replaced by the domain's
 		// teaching error, so the message says what the valid values *mean*
 		// rather than only that the request failed. See vocabulary.go.
-		if lesson := teachClosedVocabulary(details); lesson != "" {
+		if lesson := teachClosedVocabulary(path, details); lesson != "" {
 			apiErr.Err.Message = lesson
 		}
 	}
@@ -132,6 +143,7 @@ type Deps struct {
 	Projects *project.Service
 	Diagrams *diagramsvc.Service
 	Ingests  *ingestsvc.Service
+	Plan     *plansvc.Service
 	Log      *slog.Logger
 	Started  time.Time
 
@@ -198,6 +210,9 @@ func New(deps Deps) *Server {
 	}
 	if deps.Ingests != nil {
 		s.registerIngests()
+	}
+	if deps.Plan != nil {
+		s.registerPlan()
 	}
 
 	// Middleware wraps the mux rather than the huma API so that it also covers

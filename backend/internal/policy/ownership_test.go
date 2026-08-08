@@ -257,6 +257,14 @@ func TestLifecycleRules(t *testing.T) {
 		{"assignee creates a subtask", CheckCreate, KindSubTask, func() Subject { s := dev(); s.IsAssignee = true; return s }(), true},
 		{"non-assignee creates a subtask", CheckCreate, KindSubTask, dev(), false},
 		{"anyone on the project adds a worklog", CheckCreate, KindWorklog, dev(), true},
+		// D42. A dev-owned rule scoped to the project is a floor, not a
+		// ceiling: it means "you need not be a manager", not "you must not be
+		// one". Read the other way, a manager could not record what went wrong
+		// on their own project — and would therefore stop recording it.
+		{"a manager adds a worklog", CheckCreate, KindWorklog, manager(), true},
+		{"a manager raises a deviation", CheckCreate, KindDeviation, manager(), true},
+		{"a manager raises a note", CheckCreate, KindNote, manager(), true},
+		{"a developer raises a deviation", CheckCreate, KindDeviation, dev(), true},
 		{"admin creates a project", CheckCreate, KindProject, admin(), true},
 		{"manager creates a project", CheckCreate, KindProject, manager(), false},
 		{"manager deletes a work item", CheckDelete, KindWorkItem, manager(), true},
@@ -272,6 +280,27 @@ func TestLifecycleRules(t *testing.T) {
 				t.Fatal("expected a denial")
 			}
 		})
+	}
+}
+
+// TestNoDevOwnedFieldIsProjectScoped guards the D42 exemption.
+//
+// The exemption is deliberately narrow — it applies only to lifecycle checks,
+// where the field name is empty. But if a dev-owned field scoped to the project
+// were ever added to the table, a reader would reasonably expect the same
+// "floor, not ceiling" reading to apply to it, and it would not. This fails at
+// the moment such a cell is written rather than the moment somebody relies on
+// it.
+func TestNoDevOwnedFieldIsProjectScoped(t *testing.T) {
+	for _, kind := range Kinds() {
+		fields, _, _ := Rules(kind)
+		for field, rule := range fields {
+			if rule.Owner == OwnerDeveloper && rule.Scope == ScopeProject {
+				t.Errorf("%s.%s is dev-owned and project-scoped. The D42 exemption in allows() covers "+
+					"lifecycle rules only, so this field is enforced as a ceiling — a manager cannot write it. "+
+					"Decide which reading is meant and say so in the table.", kind, field)
+			}
+		}
 	}
 }
 

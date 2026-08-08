@@ -16,6 +16,7 @@ import (
 	"github.com/Felodynn/ZettaPlanner/backend/internal/policy"
 	"github.com/Felodynn/ZettaPlanner/backend/internal/service/auth"
 	diagramsvc "github.com/Felodynn/ZettaPlanner/backend/internal/service/diagram"
+	plansvc "github.com/Felodynn/ZettaPlanner/backend/internal/service/plan"
 	"github.com/Felodynn/ZettaPlanner/backend/internal/service/project"
 	"github.com/Felodynn/ZettaPlanner/backend/internal/store"
 	"github.com/Felodynn/ZettaPlanner/backend/internal/telemetry"
@@ -48,6 +49,7 @@ func newHarness(t *testing.T) *harness {
 		Auth:     auth.New(db, quiet, 0),
 		Projects: project.New(db, quiet),
 		Diagrams: diagramsvc.New(db, quiet, 0),
+		Plan:     plansvc.New(db, quiet),
 		Log:      quiet,
 	})
 	srv := httptest.NewServer(api.Handler)

@@ -11,6 +11,7 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/Felodynn/ZettaPlanner/backend/internal/domain"
+	"github.com/Felodynn/ZettaPlanner/backend/internal/domain/plan"
 	"github.com/Felodynn/ZettaPlanner/backend/internal/policy"
 	"github.com/Felodynn/ZettaPlanner/backend/internal/store"
 )
@@ -110,6 +111,31 @@ func (Projects) Delete(ctx context.Context, q store.Querier, id uuid.UUID) error
 		return missing("project")
 	}
 	return nil
+}
+
+// NextRef issues the next human-facing work item ref for a project — ZP-14.
+//
+// The counter is on the project row and only ever goes up. It is read with
+// UPDATE ... RETURNING rather than max(ref)+1 for two reasons: parsing an
+// integer back out of text is fragile, and the row lock the UPDATE takes is
+// what serializes two concurrent creates in the same project without an
+// advisory lock or a retry loop.
+//
+// A ref is never reissued, not even after every work item in the project has
+// been deleted. Somebody has written "blocked on ZP-14" in a worklog, and no
+// care taken later can disambiguate two items that both answer to it.
+func (Projects) NextRef(ctx context.Context, q store.Querier, projectID uuid.UUID) (string, error) {
+	const sql = `UPDATE projects SET ref_seq = ref_seq + 1
+	              WHERE id = $1 AND deleted_at IS NULL
+	          RETURNING key, ref_seq`
+	var (
+		key string
+		seq int
+	)
+	if err := q.QueryRow(ctx, sql, projectID).Scan(&key, &seq); err != nil {
+		return "", notFound(err, "project")
+	}
+	return plan.Ref(key, seq), nil
 }
 
 func scanProject(row scanner) (*domain.Project, error) {

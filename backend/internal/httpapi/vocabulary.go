@@ -4,6 +4,7 @@ import (
 	"strings"
 
 	dg "github.com/Felodynn/ZettaPlanner/backend/internal/domain/diagram"
+	pl "github.com/Felodynn/ZettaPlanner/backend/internal/domain/plan"
 )
 
 // The closed vocabulary is declared twice on purpose, and the two declarations
@@ -26,7 +27,14 @@ import (
 
 // teachClosedVocabulary rewrites a validation error whose failures are
 // closed-set violations. It returns the message unchanged when none of them are.
-func teachClosedVocabulary(details []map[string]any) string {
+//
+// path is the request path. It is needed because a field name alone does not
+// identify a vocabulary: `body.status` is a work item's six-value set on one
+// route and a milestone's deliberately coarser four-value set on another.
+// Guessing from the value would teach the wrong set precisely when somebody
+// sent a value that is valid in the other one — which is the most likely
+// mistake there is.
+func teachClosedVocabulary(path string, details []map[string]any) string {
 	var lessons []string
 
 	for _, d := range details {
@@ -44,6 +52,16 @@ func teachClosedVocabulary(details []map[string]any) string {
 			err = dg.ValidateNodeKind(dg.NodeKind(value))
 		case strings.HasSuffix(location, ".level"):
 			err = dg.ValidateLevel(dg.Level(value))
+		case strings.HasSuffix(location, ".status") && strings.Contains(path, "/milestones"):
+			err = pl.ValidateMilestoneStatus(pl.MilestoneStatus(value))
+		case strings.HasSuffix(location, ".status"):
+			err = pl.ValidateStatus(pl.Status(value))
+		case strings.HasSuffix(location, ".priority"):
+			err = pl.ValidatePriority(pl.Priority(value))
+		case strings.HasSuffix(location, ".severity"):
+			err = pl.ValidateSeverity(pl.Severity(value))
+		case strings.HasSuffix(location, ".kind") && strings.Contains(path, "/worklogs"):
+			err = pl.ValidateWorklogKind(pl.WorklogKind(value))
 		}
 		if err != nil {
 			lessons = append(lessons, location+": "+err.Error())
