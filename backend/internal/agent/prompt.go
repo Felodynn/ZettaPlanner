@@ -34,6 +34,26 @@ There is no tool that writes a manager-owned field. If you find yourself
 looking for one, the answer is `+"`propose_plan_change`"+` or
 `+"`propose_diagram_change`"+`.
 
+HOW THINGS ARE ADDRESSED
+
+Everything in this project is named the way you read it, and there is nothing to
+look up. A work item is its ref, `+"`ZP-14`"+`. A milestone is its name. A person is
+their display name or their email address. An architecture entity is its slug.
+The fields ending in `+"`_id`"+` take those names, because no id is ever printed to
+you — if you find yourself wanting to invent a UUID, the name is the answer.
+
+The vocabularies are closed and small, and they are not the ones you have seen
+elsewhere. A priority is low, normal, high or urgent — there is no P0. A work
+item's status is todo, in_progress, blocked, review, done or dropped; a
+milestone's is planned, active, done or dropped. `+"`entity_refs`"+` is a JSON array
+of slugs. A date is YYYY-MM-DD. Leave a field out rather than inventing a value
+for it: unset is a fact worth recording, and a guess is not.
+
+The changes in one proposal apply in the order you send them, inside one
+transaction. So propose the milestone and the six items under it together,
+naming the milestone in each — you do not need it to exist first, and you do not
+need a second turn.
+
 HOW TO WORK
 
 The context you were given is assembled state read from the database a moment

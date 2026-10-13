@@ -26,7 +26,7 @@ models:
   planner-cloud:
     endpoint: http://localhost:11434
     tier: cloud
-    model: glm-5.2:cloud
+    model: glm-5.3-flash:cloud
     num_ctx: 262144           # MUST be explicit (D4)
     assembly_budget: 120000   # what context assembly targets; defaults to num_ctx
     caps: [tools, thinking, long_context]
@@ -57,17 +57,6 @@ models:
     keep_alive: 30m
     timeout: 20m
 
-  vision-local:
-    endpoint: http://localhost:11434
-    tier: self_hosted
-    model: gemma4:12b
-    num_ctx: 32768
-    assembly_budget: 24000
-    caps: [vision, tools, thinking]
-    concurrency: 1
-    keep_alive: 30m
-    timeout: 20m
-
   # Embeddings stay local and have no fallback. They are written inside the same
   # transaction as the row they describe, and a round trip to another host
   # inside an open transaction holds locks for the length of that round trip.
@@ -87,5 +76,5 @@ models:
 
 roles:
   planner: { requires: [tools],     prefer: [planner-cloud, planner-remote] }
-  vision:  { requires: [vision],    prefer: [vision-cloud, vision-local] }
+  vision:  { requires: [vision],    prefer: [vision-cloud] }
   embed:   { requires: [embedding], prefer: [embed-local] }

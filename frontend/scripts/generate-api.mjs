@@ -7,13 +7,20 @@
 // prefers the binary over a running server.
 //
 //   node scripts/generate-api.mjs              # build the backend, emit, generate
+//   ZP_OPENAPI_FILE=/openapi.json …            # or read a document already emitted
 //   ZP_OPENAPI_URL=http://host/openapi.json …  # or pull from a running server
+//
+// ZP_OPENAPI_FILE is what the container image build uses. Its backend stage has
+// already produced the document from the very binary that will serve it, and
+// the Node stage has no Go toolchain to build a second one with — so the choice
+// there is between reading that file and skipping generation, and skipping it
+// would mean the image ships whatever client happened to be committed.
 //
 // The generated file is committed. A stale client that compiles is worse than
 // a missing one, so CI runs this and fails on a diff.
 
 import { execFileSync } from 'node:child_process'
-import { mkdirSync, writeFileSync, existsSync } from 'node:fs'
+import { mkdirSync, writeFileSync, existsSync, readFileSync } from 'node:fs'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import openapiTS, { astToString } from 'openapi-typescript'
@@ -38,13 +45,24 @@ async function documentFromURL(url) {
   return await res.text()
 }
 
-const raw = process.env.ZP_OPENAPI_URL
-  ? await documentFromURL(process.env.ZP_OPENAPI_URL)
-  : documentFromBinary()
+function documentFromFile(file) {
+  if (!existsSync(file)) {
+    throw new Error(`ZP_OPENAPI_FILE names ${file}, which does not exist`)
+  }
+  process.stderr.write(`generate-api: reading ${file}\n`)
+  return readFileSync(file, 'utf8')
+}
+
+const raw = process.env.ZP_OPENAPI_FILE
+  ? documentFromFile(process.env.ZP_OPENAPI_FILE)
+  : process.env.ZP_OPENAPI_URL
+    ? await documentFromURL(process.env.ZP_OPENAPI_URL)
+    : documentFromBinary()
 
 if (!raw) {
   throw new Error(
-    'no OpenAPI document: the backend directory is missing and ZP_OPENAPI_URL is unset',
+    'no OpenAPI document: the backend directory is missing and neither ' +
+      'ZP_OPENAPI_FILE nor ZP_OPENAPI_URL is set',
   )
 }
 

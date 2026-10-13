@@ -166,25 +166,32 @@ func TestProposalAppliesAtomicallyAsOneRevision(t *testing.T) {
 // TestAFailingChangeAppliesNothing is the half that matters.
 //
 // A proposal whose second change cannot land must leave the first one unwritten.
-// The failure is a value the propose-time check cannot catch — `banana` is a
-// well-formed value of a real field — which is exactly the case where a
-// half-applied proposal would otherwise be discovered by a person wondering why
-// one of the two things they agreed to happened.
+// The failure is one the propose-time check cannot catch, and the dependency
+// cycle here is the honest example of that: every ref in it names a real item,
+// nothing about the change is malformed, and whether it closes a loop is a fact
+// about the whole graph at the moment of approval rather than about the change.
+// This is exactly the case where a half-applied proposal would otherwise be
+// discovered by a person wondering why one of the two things they agreed to
+// happened.
 func TestAFailingChangeAppliesNothing(t *testing.T) {
 	f := newGovFixture(t)
 	one := f.createItem(f.mgr, map[string]any{"title": "Session expiry", "priority": "low"})
 	two := f.createItem(f.mgr, map[string]any{"title": "Token rotation"})
 
+	// two already blocks one, so the proposal's second change closes the ring.
+	f.h.decode(f.mgr.do(http.MethodPut, "/api/v1/work-items/"+two.ID.String()+"/dependencies",
+		map[string]any{"blocks": []string{one.ID.String()}}), http.StatusOK, nil)
+
 	id := f.proposePlan("Two changes, one of them impossible", "exercising atomicity",
 		map[string]any{"op": "update", "target": "work_item", "ref": one.Ref,
 			"after": map[string]any{"priority": "urgent"}},
-		map[string]any{"op": "update", "target": "work_item", "ref": two.Ref,
-			"after": map[string]any{"status": "banana"}},
+		map[string]any{"op": "update", "target": "work_item", "ref": one.Ref,
+			"after": map[string]any{"dependencies": map[string]any{"blocks": []any{two.Ref}}}},
 	)
 
 	body := f.approve(f.mgr, id, http.StatusBadRequest)
-	if msg := errMessage(body); !strings.Contains(msg, "banana") {
-		t.Errorf("the failure does not name the value that caused it: %s", msg)
+	if msg := errMessage(body); !strings.Contains(msg, two.Ref) {
+		t.Errorf("the failure does not name the items that caused it: %s", msg)
 	}
 
 	if got := f.getItem(f.mgr, one.ID).Priority; got != "low" {

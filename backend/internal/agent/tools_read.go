@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/google/uuid"
+
 	dg "github.com/Felodynn/ZettaPlanner/backend/internal/domain/diagram"
 	pl "github.com/Felodynn/ZettaPlanner/backend/internal/domain/plan"
 	"github.com/Felodynn/ZettaPlanner/backend/internal/repo"
@@ -18,9 +20,11 @@ import (
 func readTools() []Tool {
 	return []Tool{
 		{
-			Name:        "get_plan",
-			Kind:        KindRead,
-			Description: "The project's milestones and open work items, with status, assignee and dates.",
+			Name: "get_plan",
+			Kind: KindRead,
+			Description: "The project's milestones, its people, and its open work items with status, assignee and dates. " +
+				"This is also where the names a proposal addresses things by come from: a milestone's name, a person's " +
+				"name or email, a work item's ref.",
 			Params: schema(`{"type":"object","properties":{
 				"status":{"type":"string","enum":["todo","in_progress","blocked","review","done","dropped"],
 				          "description":"Restrict to one status. Omit for every open item."},
@@ -92,6 +96,15 @@ func readTools() []Tool {
 }
 
 func runGetPlan(ctx context.Context, s *session, a args) (Result, error) {
+	// A status outside the vocabulary matches no rows, and the answer that comes
+	// back — "(none matching)" — reads as a fact about the project rather than
+	// about the filter. That is worse than an error: the model concludes there
+	// is no work in progress and acts on it. Refused instead, with the six.
+	if status := a.str("status"); status != "" {
+		if err := pl.ValidateStatus(pl.Status(status)); err != nil {
+			return Result{}, refuse("%s", err.Error())
+		}
+	}
 	f := repo.WorkItemFilter{Status: pl.Status(a.str("status"))}
 	if only, ok := a.boolVal("assignee_only"); ok && only {
 		id := s.principal.UserID
@@ -107,12 +120,38 @@ func runGetPlan(ctx context.Context, s *session, a args) (Result, error) {
 		return Result{}, err
 	}
 
+	// The roster is part of the answer rather than a separate tool. A proposal
+	// names a person by name or email and a milestone by name, so a plan read
+	// that printed neither left `assignee_id` and `milestone_id` unfillable —
+	// which is how a project ends up with milestones nothing is filed under and
+	// work nobody is assigned to.
+	people, err := s.deps.members.List(ctx, s.deps.DB.Pool, s.turn.ProjectID)
+	if err != nil {
+		return Result{}, err
+	}
+	names := make(map[uuid.UUID]string, len(people))
+	for _, m := range people {
+		names[m.UserID] = m.DisplayName
+	}
+
 	var b strings.Builder
-	b.WriteString("milestones:\n")
+	b.WriteString("milestones — name one of these to file work under it:\n")
 	for _, m := range milestones {
 		fmt.Fprintf(&b, "  %s [%s] due %s\n", m.Name, m.Status, orNone(pl.FormatDate(m.DueDate)))
 	}
 	if len(milestones) == 0 {
+		b.WriteString("  (none yet; a proposal may create one and file work under it in the same proposal)\n")
+	}
+
+	b.WriteString("\npeople on this project — name one of these to assign work:\n")
+	for _, m := range people {
+		fmt.Fprintf(&b, "  %s <%s> [%s]", m.DisplayName, m.Email, m.EffectiveRole)
+		if m.UserID == s.principal.UserID {
+			b.WriteString("  (the person who asked for this turn)")
+		}
+		b.WriteString("\n")
+	}
+	if len(people) == 0 {
 		b.WriteString("  (none)\n")
 	}
 
@@ -126,6 +165,11 @@ func runGetPlan(ctx context.Context, s *session, a args) (Result, error) {
 		fmt.Fprintf(&b, "  %-8s %-12s %3d%%  %s", w.Ref, w.Status, w.ProgressPct, w.Title)
 		if d := pl.FormatDate(w.DueDate); d != "" {
 			fmt.Fprintf(&b, "  due %s", d)
+		}
+		if w.AssigneeID != nil {
+			if who := names[*w.AssigneeID]; who != "" {
+				fmt.Fprintf(&b, "  assignee %s", who)
+			}
 		}
 		if w.AssigneeID != nil && *w.AssigneeID == s.principal.UserID {
 			b.WriteString("  (assigned to the person who asked)")

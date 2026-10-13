@@ -1,0 +1,42 @@
+# Ingress for the locally-managed tunnel `zettaplanner`.
+#
+# Created with the cloudflared CLI against the felodynn.com zone rather than
+# through the Zero Trust dashboard — same product, no payment method required.
+# Because it is locally managed, the routing lives here in git rather than in
+# Cloudflare's UI, which is the better place for it anyway.
+#
+# A tunnel of its own, not a second hostname on `felodynn-demo`. The two
+# deployments then start, stop, break and get revoked independently; sharing one
+# would mean a demo restart takes the product down with it.
+#
+# The credentials file is the tunnel's private key. It is NOT in this repo: it
+# lives at ~/.cloudflared/<tunnel-id>.json and is bind-mounted read-only by
+# docker-compose.yml.
+
+tunnel: e5943c39-250a-4cf7-9f0d-d00e9a557a4f
+credentials-file: /etc/cloudflared/creds.json
+
+# The container is replaced, not patched.
+no-autoupdate: true
+
+ingress:
+  - hostname: zettaplanner.felodynn.com
+    # The app container runs with host networking so the API can reach the
+    # Ollama daemon on 127.0.0.1:11434. nginx therefore binds a host port, and
+    # this container is on the host network too so that `127.0.0.1` means the
+    # same machine to both of them.
+    service: http://127.0.0.1:8091
+    originRequest:
+      # A turn can legitimately run for minutes and the thread's event stream
+      # is open indefinitely. Cloudflare's own 100s edge limit applies to the
+      # first response byte, which the API always sends promptly; these two are
+      # about the hop from cloudflared to nginx, which must not be the thing
+      # that cuts a live stream.
+      connectTimeout: 30s
+      noTLSVerify: false
+      disableChunkedEncoding: false
+
+  # Required catch-all. Anything reaching the tunnel with another Host header —
+  # a stale record, a scanner — gets a flat 404 rather than being quietly served
+  # the product.
+  - service: http_status:404

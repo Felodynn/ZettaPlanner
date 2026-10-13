@@ -15,6 +15,7 @@ import (
 	dg "github.com/Felodynn/ZettaPlanner/backend/internal/domain/diagram"
 	pr "github.com/Felodynn/ZettaPlanner/backend/internal/domain/proposal"
 	"github.com/Felodynn/ZettaPlanner/backend/internal/policy"
+	"github.com/Felodynn/ZettaPlanner/backend/internal/repo"
 	diagramsvc "github.com/Felodynn/ZettaPlanner/backend/internal/service/diagram"
 	plansvc "github.com/Felodynn/ZettaPlanner/backend/internal/service/plan"
 )
@@ -128,6 +129,22 @@ func (s *Service) applyWorkItem(ctx context.Context, tx pgx.Tx, projectID uuid.U
 		return err
 	}
 
+	// A proposal names a milestone and a person the way they are written down,
+	// not by id — nothing an agent or a reviewer reads ever prints one. Resolved
+	// here rather than at propose time so the diff a human agreed to still says
+	// "Foundation & Infrastructure", and so a milestone this same proposal
+	// created a moment ago, in this transaction, resolves like any other.
+	if milestone != nil {
+		if err := s.resolveMilestoneRef(ctx, tx, projectID, milestone); err != nil {
+			return err
+		}
+	}
+	if assignee != nil {
+		if err := s.resolvePersonRef(ctx, tx, projectID, assignee); err != nil {
+			return err
+		}
+	}
+
 	target := c.TargetID
 	if c.Op == pr.OpCreate {
 		created, err := s.plan.CreateWorkItemInTx(ctx, tx, plansvc.CreateWorkItemInput{
@@ -200,6 +217,89 @@ func withoutLinks(fields []string) []string {
 	return out
 }
 
+// resolveMilestoneRef turns the milestone a change names into an id, in place.
+//
+// Names rather than ids, and that is the field's contract rather than a
+// leniency: `get_plan` and assembled context both print milestones by name and
+// neither prints an id, so a `milestone_id` that accepted only ids was a field
+// the planner could not fill — which is how a project ends up with milestones
+// that nothing is filed under. An id is still accepted, because a human editing
+// a proposal by hand has one.
+//
+// Read through the transaction, so a milestone created by an earlier change in
+// the same proposal resolves here.
+func (s *Service) resolveMilestoneRef(ctx context.Context, tx pgx.Tx, projectID uuid.UUID, ref *string) error {
+	name := strings.TrimSpace(*ref)
+	if name == "" {
+		return nil // clearing the milestone
+	}
+	if _, err := uuid.Parse(name); err == nil {
+		return nil
+	}
+	list, err := s.milestones.ListByProject(ctx, tx, projectID)
+	if err != nil {
+		return err
+	}
+	var names []string
+	for _, m := range list {
+		if strings.EqualFold(strings.TrimSpace(m.Name), name) {
+			*ref = m.ID.String()
+			return nil
+		}
+		names = append(names, strconv.Quote(m.Name))
+	}
+	return fmt.Errorf("%w: this would file the item under the milestone %q, and there is no such milestone "+
+		"in this project. The milestones are: %s", domain.ErrNotFound, name, orNone(strings.Join(names, ", ")))
+}
+
+// resolvePersonRef turns the person a change names into a user id, in place.
+// A display name or an email address, for the same reason milestones are named:
+// no id is ever shown to whoever wrote the proposal.
+func (s *Service) resolvePersonRef(ctx context.Context, tx pgx.Tx, projectID uuid.UUID, ref *string) error {
+	who := strings.TrimSpace(*ref)
+	if who == "" {
+		return nil // unassigning
+	}
+	if _, err := uuid.Parse(who); err == nil {
+		return nil
+	}
+	people, err := s.members.List(ctx, tx, projectID)
+	if err != nil {
+		return err
+	}
+	var (
+		matched []repo.MemberRow
+		all     []string
+	)
+	for _, m := range people {
+		if strings.EqualFold(m.Email, who) || strings.EqualFold(m.DisplayName, who) {
+			matched = append(matched, m)
+		}
+		all = append(all, fmt.Sprintf("%s <%s>", m.DisplayName, m.Email))
+	}
+	switch len(matched) {
+	case 1:
+		*ref = matched[0].UserID.String()
+		return nil
+	case 0:
+		return fmt.Errorf("%w: this would assign the work to %q, who is not a member of this project. "+
+			"The members are: %s", domain.ErrNotFound, who, orNone(strings.Join(all, "; ")))
+	default:
+		// Never guessed. Picking one of two people with the same display name
+		// assigns somebody else's work to them, and nothing downstream would
+		// ever show that it was a coin toss.
+		return fmt.Errorf("%w: %d members of this project answer to %q, so the assignee is ambiguous. "+
+			"Raise it again naming them by email address", domain.ErrInvalid, len(matched), who)
+	}
+}
+
+func orNone(s string) string {
+	if strings.TrimSpace(s) == "" {
+		return "(none)"
+	}
+	return s
+}
+
 // itemIDsForRefs resolves the refs a proposal names into work item ids.
 //
 // Refs rather than ids, because `ZP-14` is what a model has seen and what a
@@ -252,6 +352,15 @@ func (s *Service) applySubTask(ctx context.Context, tx pgx.Tx, c pr.Change, w pl
 	assignee, seq := f.strPtr("assignee_id"), f.intPtr("seq")
 	if err := f.err(); err != nil {
 		return err
+	}
+	if assignee != nil {
+		item, err := s.items.ByIDAny(ctx, tx, *c.TargetID)
+		if err != nil {
+			return err
+		}
+		if err := s.resolvePersonRef(ctx, tx, item.ProjectID, assignee); err != nil {
+			return err
+		}
 	}
 	_, err := s.plan.CreateSubTaskInTx(ctx, tx, plansvc.CreateSubTaskInput{
 		WorkItemID: *c.TargetID,
@@ -371,6 +480,23 @@ func (r *reader) deps() (blocks, relates []string, present bool) {
 		r.failed = append(r.failed, "dependencies is not an object; send {\"blocks\": [refs], \"relates\": [refs]}")
 		return nil, nil, true
 	}
+	// A key that is neither is a failure, not a skip. Reading only `blocks` and
+	// `relates` and ignoring the rest would let a proposal saying `blocked_by`
+	// apply cleanly, report success and wire nothing — the one failure a
+	// reviewer has no way to see, because the diff they approved still says it.
+	var unknown []string
+	for key := range obj {
+		if key != "blocks" && key != "relates" {
+			unknown = append(unknown, strconv.Quote(key))
+		}
+	}
+	if len(unknown) > 0 {
+		sort.Strings(unknown)
+		r.failed = append(r.failed, fmt.Sprintf(
+			"dependencies has %s, which %s not a kind of dependency; the kinds are blocks and relates",
+			strings.Join(unknown, ", "), isAre(len(unknown))))
+		return nil, nil, true
+	}
 	read := func(key string) []string {
 		raw, ok := obj[key]
 		if !ok || raw == nil {
@@ -447,9 +573,68 @@ func isAre(n int) string {
 
 // ── diagram edits ────────────────────────────────────────────────────────────
 
+// SettableDiagramFields is what a proposal may set on one graph target.
+//
+// Written here, immediately above the only function that reads them, because
+// these have no ownership table to be generated from: §4.2 makes the whole
+// graph manager-owned in one line and says nothing about which keys of a node
+// exist. The pairing is the safeguard — a key added to `graphEdit` below and
+// not to this list is a key the propose tools would refuse, which is a visible
+// failure, and a key in this list that `graphEdit` does not read is caught by
+// the test that composes one of each.
+func SettableDiagramFields(target pr.ChangeTarget) []string {
+	switch target {
+	case pr.ChangeNode:
+		return []string{"kind", "name", "parent", "slug", "summary"}
+	case pr.ChangeEdge:
+		return []string{"from", "label", "relation", "to"}
+	case pr.ChangeDiagram:
+		return []string{"level", "name"}
+	}
+	return nil
+}
+
+// unknownDiagramFields rejects a key `graphEdit` would not read.
+//
+// The same rule the plan side has had since D55, arriving late on this one. A
+// node change carrying `technology` or `owner` applied cleanly, reported
+// success and dropped it — and the proposal a reviewer approved still says it
+// on the screen, so there is nothing to notice.
+func unknownDiagramFields(c pr.Change) error {
+	settable := SettableDiagramFields(c.Target)
+	if len(settable) == 0 {
+		return nil
+	}
+	known := make(map[string]bool, len(settable))
+	for _, f := range settable {
+		known[f] = true
+	}
+	var unknown []string
+	for key := range c.After {
+		// `diagram` is addressing rather than a field: the propose tool stamps
+		// it so an approval knows which picture a bare node slug belonged to.
+		if key == "diagram" || known[key] {
+			continue
+		}
+		unknown = append(unknown, strconv.Quote(key))
+	}
+	if len(unknown) == 0 {
+		return nil
+	}
+	sort.Strings(unknown)
+	return fmt.Errorf("%w: change %d sets %s on a %s, which %s not settable — the settable fields are %s. "+
+		"Nothing was applied: a proposal is agreed to as a whole, and applying the part that was understood "+
+		"would deliver something nobody approved",
+		domain.ErrInvalid, c.Seq, strings.Join(unknown, ", "), c.Target, isAre(len(unknown)),
+		strings.Join(settable, ", "))
+}
+
 // graphEdit turns one recorded change into one element-level edit.
 func graphEdit(c pr.Change) (diagramsvc.GraphEdit, error) {
 	op := diagramsvc.EditOp(c.Op)
+	if err := unknownDiagramFields(c); err != nil {
+		return diagramsvc.GraphEdit{}, err
+	}
 
 	switch c.Target {
 	case pr.ChangeNode:

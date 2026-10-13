@@ -1,0 +1,147 @@
+name: zettaplanner
+
+services:
+  # ── the database ───────────────────────────────────────────────────────────
+  #
+  # pgvector rather than plain postgres: the first migration asserts the
+  # extension and stops with a message naming the fix rather than creating it,
+  # because a migration runner that needs superuser is a deployment where the
+  # application role has it. This image ships the extension already installed,
+  # so the assertion passes without anyone holding superuser.
+  #
+  # Published on loopback only. Port 5432 on this host is a different Postgres
+  # entirely; 5433 is this one, and it is reachable from the machine (for psql,
+  # for a backup) and from nowhere else.
+  db:
+    image: pgvector/pgvector:pg18
+    container_name: zettaplanner-db
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: zettaplanner
+      POSTGRES_USER: zettaplanner
+      POSTGRES_PASSWORD: ${ZP_DB_PASSWORD:?set ZP_DB_PASSWORD in .env}
+      # The volume outlives the container, so initdb runs once ever. Setting
+      # the collation and encoding here rather than discovering them later.
+      POSTGRES_INITDB_ARGS: "--encoding=UTF8 --locale=C"
+    ports:
+      - "127.0.0.1:5433:5432"
+    volumes:
+      # /var/lib/postgresql, not /var/lib/postgresql/data. From 18 these images
+      # put the cluster in a major-version subdirectory of that path so that a
+      # later `pg_upgrade --link` is not crossing a mount boundary — and they
+      # refuse to start against a volume mounted at the old location.
+      - zp-db:/var/lib/postgresql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U zettaplanner -d zettaplanner"]
+      interval: 10s
+      timeout: 5s
+      start_period: 30s
+      retries: 5
+    # The extension has to exist in this database before the first migration
+    # runs, and only a superuser can create it. The image's init hook is where
+    # that superuser exists.
+    configs:
+      - source: pgvector-init
+        target: /docker-entrypoint-initdb.d/00-vector.sql
+
+  # ── the product ────────────────────────────────────────────────────────────
+  #
+  # Host networking, deliberately. The model registry reaches the planner and
+  # vision models through the Ollama daemon on this machine, which listens on
+  # 127.0.0.1:11434 and nothing else. A bridged container cannot see that
+  # without either reconfiguring Ollama to listen on the docker bridge (root on
+  # the host's unit file) or widening it to 0.0.0.0 (putting a model server on
+  # the LAN). Host networking costs neither, and it is already how `open-webui`
+  # on this box reaches the same daemon.
+  #
+  # The price is that nginx binds a host port rather than a container one — so
+  # it binds 127.0.0.1:8091, which keeps the product off the LAN as firmly as a
+  # bridge network would. The tunnel is the only way in.
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: zettaplanner:latest
+    container_name: zettaplanner-app
+    restart: unless-stopped
+    network_mode: host
+    environment:
+      # 127.0.0.1:5433 is the db service above, published on this host. With
+      # host networking there is no compose DNS, so the port is the address.
+      ZP_DATABASE_URL: postgres://zettaplanner:${ZP_DB_PASSWORD:?set ZP_DB_PASSWORD in .env}@127.0.0.1:5433/zettaplanner?sslmode=disable
+      # Cloudflare terminates TLS, so the cookie must say Secure or a browser
+      # will hold a session cookie it should be refusing to send back.
+      ZP_SECURE_COOKIES: "true"
+      # nginx is genuinely in front, so X-Forwarded-For is the client and the
+      # audit log should say so rather than recording 127.0.0.1 for everyone.
+      ZP_TRUST_PROXY: "true"
+      # Empty on purpose. The SPA is served from the same origin as the API, so
+      # there is no cross-site request to allow (D2).
+      ZP_DEV_ORIGIN: ""
+      ZP_LOG_LEVEL: ${ZP_LOG_LEVEL:-info}
+      ZP_LOG_FORMAT: json
+    volumes:
+      # The model registry, read-only. The entrypoint copies it to a writable
+      # path because the probe cache is written beside it.
+      - ${ZP_MODELS_FILE:-/home/smtai/.zettaplanner/models.yaml}:/etc/zettaplanner/models.yaml:ro
+      # State that must survive a rebuild. Ingest sources are referenced by
+      # path from the database, so losing this volume orphans rows.
+      - zp-uploads:/var/lib/zettaplanner/uploads
+      # The per-project git projections (D10). Disposable in principle —
+      # regenerable with `zettaplanner git resync` — but rebuilding every
+      # project's history on every deploy is not free.
+      - zp-git:/var/lib/zettaplanner/git
+      # models.yaml + probe-cache.json.
+      - zp-state:/var/lib/zettaplanner/state
+    depends_on:
+      db:
+        condition: service_healthy
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - "wget -qO /dev/null http://127.0.0.1:8091/healthz && wget -qO /dev/null http://127.0.0.1:8091/health"
+      interval: 30s
+      timeout: 10s
+      start_period: 180s
+      retries: 3
+
+  # ── the public URL ─────────────────────────────────────────────────────────
+  #
+  # What makes zettaplanner.felodynn.com resolve to this machine. Outbound
+  # only — no port forwarding, no public IP, and the dynamic address on this
+  # line is irrelevant because nothing ever points at it.
+  #
+  # Host networking for the same reason as the app: `127.0.0.1:8091` has to
+  # mean the same socket to both containers.
+  cloudflared:
+    image: cloudflare/cloudflared:latest
+    container_name: zettaplanner-tunnel
+    restart: unless-stopped
+    network_mode: host
+    # The image runs as `nonroot` (65532), which cannot read a 0400 credentials
+    # file owned by the host user. Run as that user rather than widening the
+    # permissions on a private key. cloudflared needs no privileged ports.
+    user: "1000:1000"
+    command: tunnel --config /etc/cloudflared/config.yml run
+    volumes:
+      - ./deploy/cloudflared/config.yml:/etc/cloudflared/config.yml:ro
+      # The tunnel's private key, as written by `cloudflared tunnel create
+      # zettaplanner` on this machine. Override in .env if the deployment moves
+      # to a host with its own tunnel.
+      - ${ZP_TUNNEL_CREDENTIALS_FILE:-/home/smtai/.cloudflared/e5943c39-250a-4cf7-9f0d-d00e9a557a4f.json}:/etc/cloudflared/creds.json:ro
+    depends_on:
+      app:
+        condition: service_healthy
+
+configs:
+  pgvector-init:
+    content: |
+      -- Runs once, as superuser, on an empty data directory. The first
+      -- migration asserts this extension exists and refuses to create it.
+      CREATE EXTENSION IF NOT EXISTS vector;
+
+volumes:
+  zp-db:
+  zp-uploads:
+  zp-git:
+  zp-state:
